@@ -1,7 +1,7 @@
-//! This crate can derive synchronization required
+//! This crate can derive the synchronization required
 //! for the dependency chain of the whole execution graph.
 
-#[warn(
+#![warn(
     missing_debug_implementations,
     missing_copy_implementations,
     missing_docs,

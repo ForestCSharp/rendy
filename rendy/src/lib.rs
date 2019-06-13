@@ -1,7 +1,7 @@
 //! Rendy's top level crate.
 //! Reexports all others.
 
-#[warn(
+#![warn(
     missing_debug_implementations,
     missing_copy_implementations,
     missing_docs,
@@ -11,9 +11,31 @@
     unused_import_braces,
     unused_qualifications
 )]
+
+#[doc(inline)]
+pub use rendy_util as util;
+
+pub use gfx_hal as hal;
+
+#[cfg(feature = "empty")]
+pub use rendy_util::empty;
+
+#[cfg(feature = "dx12")]
+pub use rendy_util::dx12;
+
+#[cfg(feature = "metal")]
+pub use rendy_util::metal;
+
+#[cfg(feature = "vulkan")]
+pub use rendy_util::vulkan;
+
 #[cfg(feature = "command")]
 #[doc(inline)]
 pub use rendy_command as command;
+
+#[cfg(feature = "descriptor")]
+#[doc(inline)]
+pub use rendy_descriptor as descriptor;
 
 #[cfg(feature = "factory")]
 #[doc(inline)]
@@ -47,24 +69,6 @@ pub use rendy_shader as shader;
 #[doc(inline)]
 pub use rendy_texture as texture;
 
-#[cfg(feature = "util")]
-#[doc(inline)]
-pub use rendy_util as util;
-
 #[cfg(feature = "wsi")]
 #[doc(inline)]
 pub use rendy_wsi as wsi;
-
-pub use gfx_hal as hal;
-
-#[cfg(feature = "gfx-backend-empty")]
-pub use gfx_backend_empty as empty;
-
-#[cfg(feature = "gfx-backend-dx12")]
-pub use gfx_backend_dx12 as dx12;
-
-#[cfg(feature = "gfx-backend-metal")]
-pub use gfx_backend_metal as metal;
-
-#[cfg(feature = "gfx-backend-vulkan")]
-pub use gfx_backend_vulkan as vulkan;

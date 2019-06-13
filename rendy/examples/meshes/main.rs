@@ -8,25 +8,30 @@
     not(any(feature = "dx12", feature = "metal", feature = "vulkan")),
     allow(unused)
 )]
-
-use rendy::{
-    command::{DrawIndexedCommand, QueueId, RenderPassEncoder},
-    factory::{Config, Factory},
-    graph::{present::PresentNode, render::*, GraphBuilder, NodeBuffer, NodeImage},
-    hal::{pso::DescriptorPool, Device},
-    memory::MemoryUsageValue,
-    mesh::{AsVertex, Mesh, PosColorNorm, Transform},
-    resource::buffer::Buffer,
-    shader::{Shader, ShaderKind, SourceLanguage, StaticShaderInfo},
+use {
+    genmesh::generators::{IndexedPolygon, SharedVertex},
+    rand::distributions::{Distribution, Uniform},
+    rendy::{
+        command::{DrawIndexedCommand, QueueId, RenderPassEncoder},
+        factory::{Config, Factory},
+        graph::{
+            present::PresentNode, render::*, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
+        },
+        hal::{self, Device as _, PhysicalDevice as _},
+        memory::Dynamic,
+        mesh::{Mesh, Model, PosColorNorm},
+        resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
+        shader::{ShaderKind, SourceLanguage, SourceShaderInfo, SpirvShader},
+        wsi::winit::{Event, EventsLoop, WindowBuilder, WindowEvent},
+    },
+    std::{cmp::min, mem::size_of, time},
 };
 
-use std::{cmp::min, mem::size_of, time};
+#[cfg(feature = "spirv-reflection")]
+use rendy::shader::SpirvReflection;
 
-use genmesh::generators::{IndexedPolygon, SharedVertex};
-
-use rand::distributions::{Distribution, Uniform};
-
-use winit::{EventsLoop, WindowBuilder, Event, WindowEvent};
+#[cfg(not(feature = "spirv-reflection"))]
+use rendy::mesh::AsVertex;
 
 #[cfg(feature = "dx12")]
 type Backend = rendy::dx12::Backend;
@@ -38,19 +43,30 @@ type Backend = rendy::metal::Backend;
 type Backend = rendy::vulkan::Backend;
 
 lazy_static::lazy_static! {
-    static ref VERTEX: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/meshes/shader.vert"),
+    static ref VERTEX: SpirvShader = SourceShaderInfo::new(
+        include_str!("shader.vert"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/meshes/shader.vert").into(),
         ShaderKind::Vertex,
         SourceLanguage::GLSL,
         "main",
-    );
+    ).precompile().unwrap();
 
-    static ref FRAGMENT: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/meshes/shader.frag"),
+    static ref FRAGMENT: SpirvShader = SourceShaderInfo::new(
+        include_str!("shader.frag"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/meshes/shader.frag").into(),
         ShaderKind::Fragment,
         SourceLanguage::GLSL,
         "main",
-    );
+    ).precompile().unwrap();
+
+    static ref SHADERS: rendy::shader::ShaderSetBuilder = rendy::shader::ShaderSetBuilder::default()
+        .with_vertex(&*VERTEX).unwrap()
+        .with_fragment(&*FRAGMENT).unwrap();
+}
+
+#[cfg(feature = "spirv-reflection")]
+lazy_static::lazy_static! {
+    static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,185 +94,163 @@ struct Camera {
 }
 
 #[derive(Debug)]
-struct Scene<B: gfx_hal::Backend> {
+struct Scene<B: hal::Backend> {
     camera: Camera,
     object_mesh: Option<Mesh<B>>,
     objects: Vec<nalgebra::Transform3<f32>>,
     lights: Vec<Light>,
 }
 
-#[derive(Debug)]
-struct Aux<B: gfx_hal::Backend> {
-    frames: usize,
-    align: u64,
-    scene: Scene<B>,
-}
-
 const MAX_LIGHTS: usize = 32;
 const MAX_OBJECTS: usize = 10_000;
 const UNIFORM_SIZE: u64 = size_of::<UniformArgs>() as u64;
-const TRANSFORMS_SIZE: u64 = size_of::<Transform>() as u64 * MAX_OBJECTS as u64;
+const MODELS_SIZE: u64 = size_of::<Model>() as u64 * MAX_OBJECTS as u64;
 const INDIRECT_SIZE: u64 = size_of::<DrawIndexedCommand>() as u64;
 
 const fn buffer_frame_size(align: u64) -> u64 {
-    ((UNIFORM_SIZE + TRANSFORMS_SIZE + INDIRECT_SIZE - 1) / align + 1) * align
+    ((UNIFORM_SIZE + MODELS_SIZE + INDIRECT_SIZE - 1) / align + 1) * align
 }
 
 const fn uniform_offset(index: usize, align: u64) -> u64 {
     buffer_frame_size(align) * index as u64
 }
 
-const fn transforms_offset(index: usize, align: u64) -> u64 {
+const fn models_offset(index: usize, align: u64) -> u64 {
     uniform_offset(index, align) + UNIFORM_SIZE
 }
 
 const fn indirect_offset(index: usize, align: u64) -> u64 {
-    transforms_offset(index, align) + TRANSFORMS_SIZE
+    models_offset(index, align) + MODELS_SIZE
 }
 
 #[derive(Debug, Default)]
 struct MeshRenderPipelineDesc;
 
 #[derive(Debug)]
-struct MeshRenderPipeline<B: gfx_hal::Backend> {
-    descriptor_pool: B::DescriptorPool,
-    buffer: Buffer<B>,
-    sets: Vec<B::DescriptorSet>,
+struct MeshRenderPipeline<B: hal::Backend> {
+    align: u64,
+    buffer: Escape<Buffer<B>>,
+    sets: Vec<Escape<DescriptorSet<B>>>,
 }
 
-impl<B> SimpleGraphicsPipelineDesc<B, Aux<B>> for MeshRenderPipelineDesc
+impl<B> SimpleGraphicsPipelineDesc<B, Scene<B>> for MeshRenderPipelineDesc
 where
-    B: gfx_hal::Backend,
+    B: hal::Backend,
 {
     type Pipeline = MeshRenderPipeline<B>;
 
-    fn layout(&self) -> Layout {
-        Layout {
-            sets: vec![SetLayout {
-                bindings: vec![gfx_hal::pso::DescriptorSetLayoutBinding {
-                    binding: 0,
-                    ty: gfx_hal::pso::DescriptorType::UniformBuffer,
-                    count: 1,
-                    stage_flags: gfx_hal::pso::ShaderStageFlags::GRAPHICS,
-                    immutable_samplers: false,
-                }],
-            }],
-            push_constants: Vec::new(),
-        }
+    fn load_shader_set(
+        &self,
+        factory: &mut Factory<B>,
+        _scene: &Scene<B>,
+    ) -> rendy_shader::ShaderSet<B> {
+        SHADERS.build(factory, Default::default()).unwrap()
     }
 
     fn vertices(
         &self,
     ) -> Vec<(
-        Vec<gfx_hal::pso::Element<gfx_hal::format::Format>>,
-        gfx_hal::pso::ElemStride,
-        gfx_hal::pso::InstanceRate,
+        Vec<hal::pso::Element<hal::format::Format>>,
+        hal::pso::ElemStride,
+        hal::pso::VertexInputRate,
     )> {
-        vec![
-            PosColorNorm::VERTEX.gfx_vertex_input_desc(0),
-            Transform::VERTEX.gfx_vertex_input_desc(1),
-        ]
+        #[cfg(feature = "spirv-reflection")]
+        return vec![
+            SHADER_REFLECTION
+                .attributes(&["position", "color", "normal"])
+                .unwrap()
+                .gfx_vertex_input_desc(hal::pso::VertexInputRate::Vertex),
+            SHADER_REFLECTION
+                .attributes_range(3..7)
+                .unwrap()
+                .gfx_vertex_input_desc(hal::pso::VertexInputRate::Instance(1)),
+        ];
+
+        #[cfg(not(feature = "spirv-reflection"))]
+        return vec![
+            PosColorNorm::vertex().gfx_vertex_input_desc(hal::pso::VertexInputRate::Vertex),
+            Model::vertex().gfx_vertex_input_desc(hal::pso::VertexInputRate::Instance(1)),
+        ];
     }
 
-    fn load_shader_set<'a>(
-        &self,
-        storage: &'a mut Vec<B::ShaderModule>,
-        factory: &mut Factory<B>,
-        _aux: &mut Aux<B>,
-    ) -> gfx_hal::pso::GraphicsShaderSet<'a, B> {
-        storage.clear();
+    fn layout(&self) -> Layout {
+        #[cfg(feature = "spirv-reflection")]
+        return SHADER_REFLECTION.layout().unwrap();
 
-        log::trace!("Load shader module '{:#?}'", *VERTEX);
-        storage.push(VERTEX.module(factory).unwrap());
-
-        log::trace!("Load shader module '{:#?}'", *FRAGMENT);
-        storage.push(FRAGMENT.module(factory).unwrap());
-
-        gfx_hal::pso::GraphicsShaderSet {
-            vertex: gfx_hal::pso::EntryPoint {
-                entry: "main",
-                module: &storage[0],
-                specialization: gfx_hal::pso::Specialization::default(),
-            },
-            fragment: Some(gfx_hal::pso::EntryPoint {
-                entry: "main",
-                module: &storage[1],
-                specialization: gfx_hal::pso::Specialization::default(),
-            }),
-            hull: None,
-            domain: None,
-            geometry: None,
-        }
+        #[cfg(not(feature = "spirv-reflection"))]
+        return Layout {
+            sets: vec![SetLayout {
+                bindings: vec![hal::pso::DescriptorSetLayoutBinding {
+                    binding: 0,
+                    ty: hal::pso::DescriptorType::UniformBuffer,
+                    count: 1,
+                    stage_flags: hal::pso::ShaderStageFlags::GRAPHICS,
+                    immutable_samplers: false,
+                }],
+            }],
+            push_constants: Vec::new(),
+        };
     }
 
     fn build<'a>(
         self,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         _queue: QueueId,
-        aux: &mut Aux<B>,
-        buffers: Vec<NodeBuffer<'a, B>>,
-        images: Vec<NodeImage<'a, B>>,
-        set_layouts: &[B::DescriptorSetLayout],
+        _scene: &Scene<B>,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
+        set_layouts: &[Handle<DescriptorSetLayout<B>>],
     ) -> Result<MeshRenderPipeline<B>, failure::Error> {
         assert!(buffers.is_empty());
         assert!(images.is_empty());
         assert_eq!(set_layouts.len(), 1);
 
-        let (frames, align) = (aux.frames, aux.align);
-
-        let mut descriptor_pool = unsafe {
-            factory.create_descriptor_pool(
-                frames,
-                Some(gfx_hal::pso::DescriptorRangeDesc {
-                    ty: gfx_hal::pso::DescriptorType::UniformBuffer,
-                    count: frames,
-                }),
-            )
-        }
-        .unwrap();
+        let frames = ctx.frames_in_flight as _;
+        let align = factory
+            .physical()
+            .limits()
+            .min_uniform_buffer_offset_alignment;
 
         let buffer = factory
             .create_buffer(
-                align,
-                buffer_frame_size(align) * frames as u64,
-                (
-                    gfx_hal::buffer::Usage::UNIFORM
-                        | gfx_hal::buffer::Usage::INDIRECT
-                        | gfx_hal::buffer::Usage::VERTEX,
-                    MemoryUsageValue::Dynamic,
-                ),
+                BufferInfo {
+                    size: buffer_frame_size(align) * frames as u64,
+                    usage: hal::buffer::Usage::UNIFORM
+                        | hal::buffer::Usage::INDIRECT
+                        | hal::buffer::Usage::VERTEX,
+                },
+                Dynamic,
             )
             .unwrap();
 
         let mut sets = Vec::new();
         for index in 0..frames {
             unsafe {
-                let set = descriptor_pool.allocate_set(&set_layouts[0]).unwrap();
-                factory.write_descriptor_sets(Some(gfx_hal::pso::DescriptorSetWrite {
-                    set: &set,
+                let set = factory
+                    .create_descriptor_set(set_layouts[0].clone())
+                    .unwrap();
+                factory.write_descriptor_sets(Some(hal::pso::DescriptorSetWrite {
+                    set: set.raw(),
                     binding: 0,
                     array_offset: 0,
-                    descriptors: Some(gfx_hal::pso::Descriptor::Buffer(
+                    descriptors: Some(hal::pso::Descriptor::Buffer(
                         buffer.raw(),
-                        Some(uniform_offset(index, align))..Some(uniform_offset(index, align) + UNIFORM_SIZE),
+                        Some(uniform_offset(index, align))
+                            ..Some(uniform_offset(index, align) + UNIFORM_SIZE),
                     )),
                 }));
                 sets.push(set);
             }
         }
 
-
-        Ok(MeshRenderPipeline {
-            descriptor_pool,
-            buffer,
-            sets,
-        })
+        Ok(MeshRenderPipeline { align, buffer, sets })
     }
 }
 
-impl<B> SimpleGraphicsPipeline<B, Aux<B>> for MeshRenderPipeline<B>
+impl<B> SimpleGraphicsPipeline<B, Scene<B>> for MeshRenderPipeline<B>
 where
-    B: gfx_hal::Backend,
+    B: hal::Backend,
 {
     type Desc = MeshRenderPipelineDesc;
 
@@ -264,17 +258,15 @@ where
         &mut self,
         factory: &Factory<B>,
         _queue: QueueId,
-        _set_layouts: &[B::DescriptorSetLayout],
+        _set_layouts: &[Handle<DescriptorSetLayout<B>>],
         index: usize,
-        aux: &Aux<B>,
+        scene: &Scene<B>,
     ) -> PrepareResult {
-        let (scene, align) = (&aux.scene, aux.align);
-
         unsafe {
             factory
                 .upload_visible_buffer(
                     &mut self.buffer,
-                    uniform_offset(index, align),
+                    uniform_offset(index, self.align),
                     &[UniformArgs {
                         pad: [0, 0, 0],
                         proj: scene.camera.proj.to_homogeneous(),
@@ -299,7 +291,7 @@ where
             factory
                 .upload_visible_buffer(
                     &mut self.buffer,
-                    indirect_offset(index, align),
+                    indirect_offset(index, self.align),
                     &[DrawIndexedCommand {
                         index_count: scene.object_mesh.as_ref().unwrap().len(),
                         instance_count: scene.objects.len() as u32,
@@ -311,15 +303,17 @@ where
                 .unwrap()
         };
 
-        unsafe {
-            factory
-                .upload_visible_buffer(
-                    &mut self.buffer,
-                    transforms_offset(index, align),
-                    &scene.objects[..],
-                )
-                .unwrap()
-        };
+        if !scene.objects.is_empty() {
+            unsafe {
+                factory
+                    .upload_visible_buffer(
+                        &mut self.buffer,
+                        models_offset(index, self.align),
+                        &scene.objects[..],
+                    )
+                    .unwrap()
+            };
+        }
 
         PrepareResult::DrawReuse
     }
@@ -329,44 +323,48 @@ where
         layout: &B::PipelineLayout,
         mut encoder: RenderPassEncoder<'_, B>,
         index: usize,
-        aux: &Aux<B>,
+        scene: &Scene<B>,
     ) {
         encoder.bind_graphics_descriptor_sets(
             layout,
             0,
-            Some(&self.sets[index]),
+            Some(self.sets[index].raw()),
             std::iter::empty(),
         );
-        assert!(aux.scene
+
+        #[cfg(feature = "spirv-reflection")]
+        let vertex = [SHADER_REFLECTION
+            .attributes(&["position", "color", "normal"])
+            .unwrap()];
+
+        #[cfg(not(feature = "spirv-reflection"))]
+        let vertex = [PosColorNorm::vertex()];
+
+        scene
             .object_mesh
             .as_ref()
             .unwrap()
-            .bind(&[PosColorNorm::VERTEX], &mut encoder)
-            .is_ok());
+            .bind(0, &vertex, &mut encoder)
+            .unwrap();
+
         encoder.bind_vertex_buffers(
             1,
-            std::iter::once((self.buffer.raw(), transforms_offset(index, aux.align))),
+            std::iter::once((self.buffer.raw(), models_offset(index, self.align))),
         );
         encoder.draw_indexed_indirect(
             self.buffer.raw(),
-            indirect_offset(index, aux.align),
+            indirect_offset(index, self.align),
             1,
             INDIRECT_SIZE as u32,
         );
     }
 
-    fn dispose(mut self, factory: &mut Factory<B>, _aux: &mut Aux<B>) {
-        unsafe {
-            self.descriptor_pool.reset();
-            factory.destroy_descriptor_pool(self.descriptor_pool);
-        }
-    }
+    fn dispose(self, _factory: &mut Factory<B>, _scene: &Scene<B>) {}
 }
 
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Warn)
         .filter_module("meshes", log::LevelFilter::Trace)
         .init();
 
@@ -383,28 +381,30 @@ fn main() {
 
     event_loop.poll_events(|_| ());
 
-    let surface = factory.create_surface(window.into());
-    let aspect = surface.aspect();
+    let surface = factory.create_surface(&window);
 
-    let mut graph_builder = GraphBuilder::<Backend, Aux<Backend>>::new();
+    let mut graph_builder = GraphBuilder::<Backend, Scene<Backend>>::new();
+
+    let size = window
+        .get_inner_size()
+        .unwrap()
+        .to_physical(window.get_hidpi_factor());
+    let window_kind = hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1);
+    let aspect = size.width / size.height;
 
     let color = graph_builder.create_image(
-        surface.kind(),
+        window_kind,
         1,
         factory.get_surface_format(&surface),
-        MemoryUsageValue::Data,
-        Some(gfx_hal::command::ClearValue::Color(
-            [1.0, 1.0, 1.0, 1.0].into(),
-        )),
+        Some(hal::command::ClearValue::Color([1.0, 1.0, 1.0, 1.0].into())),
     );
 
     let depth = graph_builder.create_image(
-        surface.kind(),
+        window_kind,
         1,
-        gfx_hal::format::Format::D16Unorm,
-        MemoryUsageValue::Data,
-        Some(gfx_hal::command::ClearValue::DepthStencil(
-            gfx_hal::command::ClearDepthStencil(1.0, 0),
+        hal::format::Format::D16Unorm,
+        Some(hal::command::ClearValue::DepthStencil(
+            hal::command::ClearDepthStencil(1.0, 0),
         )),
     );
 
@@ -416,16 +416,15 @@ fn main() {
             .into_pass(),
     );
 
-    let present_builder = PresentNode::builder(&factory, surface, color)
-        .with_dependency(pass);
+    let present_builder = PresentNode::builder(&factory, surface, color).with_dependency(pass);
 
     let frames = present_builder.image_count();
 
     graph_builder.add_node(present_builder);
 
-    let scene = Scene {
+    let mut scene = Scene {
         camera: Camera {
-            proj: nalgebra::Perspective3::new(aspect, 3.1415 / 4.0, 1.0, 200.0),
+            proj: nalgebra::Perspective3::new(aspect as f32, 3.1415 / 4.0, 1.0, 200.0),
             view: nalgebra::Projective3::identity() * nalgebra::Translation3::new(0.0, 0.0, 10.0),
         },
         object_mesh: None,
@@ -454,18 +453,11 @@ fn main() {
         ],
     };
 
-    let mut aux = Aux {
-        frames: frames as _,
-        align: gfx_hal::adapter::PhysicalDevice::limits(factory.physical())
-            .min_uniform_buffer_offset_alignment,
-        scene
-    };
-
-    log::info!("{:#?}", aux.scene);
+    log::info!("{:#?}", scene);
 
     let mut graph = graph_builder
         .with_frames_in_flight(frames)
-        .build(&mut factory, &mut families, &mut aux)
+        .build(&mut factory, &mut families, &scene)
         .unwrap();
 
     let icosphere = genmesh::generators::IcoSphere::subdivide(4);
@@ -487,11 +479,11 @@ fn main() {
         })
         .collect();
 
-    aux.scene.object_mesh = Some(
+    scene.object_mesh = Some(
         Mesh::<Backend>::builder()
             .with_indices(&indices[..])
             .with_vertices(&vertices[..])
-            .build(graph.node_queue(pass), &mut factory)
+            .build(graph.node_queue(pass), &factory)
             .unwrap(),
     );
 
@@ -506,21 +498,24 @@ fn main() {
     let mut checkpoint = started;
     let mut should_close = false;
 
-    while !should_close && aux.scene.objects.len() < MAX_OBJECTS {
+    while !should_close && scene.objects.len() < MAX_OBJECTS {
         let start = frames.start;
-        let from = aux.scene.objects.len();
+        let from = scene.objects.len();
         for _ in &mut frames {
             factory.maintain(&mut families);
             event_loop.poll_events(|event| match event {
-                Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => should_close = true,
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    ..
+                } => should_close = true,
                 _ => (),
             });
-            graph.run(&mut factory, &mut families, &mut aux);
+            graph.run(&mut factory, &mut families, &scene);
 
             let elapsed = checkpoint.elapsed();
 
-            if aux.scene.objects.len() < MAX_OBJECTS {
-                aux.scene.objects.push({
+            if scene.objects.len() < MAX_OBJECTS {
+                scene.objects.push({
                     let z = rz.sample(&mut rng);
                     nalgebra::Transform3::identity()
                         * nalgebra::Translation3::new(
@@ -531,10 +526,16 @@ fn main() {
                 })
             }
 
-            if should_close || elapsed > std::time::Duration::new(5, 0) || aux.scene.objects.len() == MAX_OBJECTS {
+            if should_close
+                || elapsed > std::time::Duration::new(5, 0)
+                || scene.objects.len() == MAX_OBJECTS
+            {
                 let frames = frames.start - start;
                 let nanos = elapsed.as_secs() * 1_000_000_000 + elapsed.subsec_nanos() as u64;
-                fpss.push((frames * 1_000_000_000 / nanos, from..aux.scene.objects.len()));
+                fpss.push((
+                    frames * 1_000_000_000 / nanos,
+                    from..scene.objects.len(),
+                ));
                 checkpoint += elapsed;
                 break;
             }
@@ -543,7 +544,7 @@ fn main() {
 
     log::info!("FPS: {:#?}", fpss);
 
-    graph.dispose(&mut factory, &mut aux);
+    graph.dispose(&mut factory, &scene);
 }
 
 #[cfg(not(any(feature = "dx12", feature = "metal", feature = "vulkan")))]

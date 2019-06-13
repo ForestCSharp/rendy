@@ -1,20 +1,29 @@
 [package]
 name = "rendy-shader"
-version = "0.1.0"
-authors = ["omni-viral <scareaangel@gmail.com>"]
+version = "0.2.0"
+authors = ["omni-viral <scareaangel@gmail.com>", "Walter Pearce <jaynus@gmail.com>"]
 edition = "2018"
-repository = "https://github.com/omni-viral/rendy"
+repository = "https://github.com/amethyst/rendy"
 license = "MIT OR Apache-2.0"
 documentation = "https://docs.rs/rendy-shader"
 keywords = ["graphics", "gfx-hal", "rendy"]
 categories = ["rendering"]
 description = "Rendy's shader compilation tool"
 
-[dependencies]
-failure = "0.1"
-gfx-hal = "0.1"
-rendy-factory = { version = "0.1", path = "../factory" }
-shaderc = { version = "0.3", optional = true }
-
 [features]
 shader-compiler = ["shaderc"]
+spirv-reflection = [ "spirv-reflect" ]
+serde-1 = ["serde", "serde_bytes"]
+
+[dependencies]
+smallvec = "0.6"
+derivative = "1.0"
+log = "0.4"
+failure = "0.1"
+gfx-hal = "0.2"
+rendy-factory = { version = "0.2.0", path = "../factory" }
+rendy-util = { version = "0.2.0", path = "../util" }
+shaderc = { version = "0.5", optional = true }
+serde = { version = "1.0", optional = true, features = ["derive"] }
+serde_bytes = { version = "0.11", optional = true }
+spirv-reflect = { version = "0.2.1", optional = true }

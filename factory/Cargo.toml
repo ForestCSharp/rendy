@@ -1,9 +1,9 @@
 [package]
 name = "rendy-factory"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["omni-viral <scareaangel@gmail.com>"]
 edition = "2018"
-repository = "https://github.com/omni-viral/rendy"
+repository = "https://github.com/amethyst/rendy"
 license = "MIT OR Apache-2.0"
 documentation = "https://docs.rs/rendy-factory"
 keywords = ["graphics", "gfx-hal", "rendy"]
@@ -11,30 +11,27 @@ categories = ["rendering"]
 description = "Rendy's factory tool"
 
 [features]
-empty = ["gfx-backend-empty", "rendy-wsi/gfx-backend-empty"]
-dx12 = ["gfx-backend-dx12", "rendy-wsi/gfx-backend-dx12"]
-metal = ["gfx-backend-metal", "rendy-wsi/gfx-backend-metal"]
-vulkan = ["gfx-backend-vulkan", "rendy-wsi/gfx-backend-vulkan"]
 serde-1 = [
     "serde",
     "rendy-memory/serde-1",
     "gfx-hal/serde",
 ]
-no-slow-safety-checks = ["rendy-wsi/no-slow-safety-checks", "rendy-util/no-slow-safety-checks"]
+empty = ["rendy-util/gfx-backend-empty"]
+dx12 = ["rendy-util/gfx-backend-dx12"]
+metal = ["rendy-util/gfx-backend-metal"]
+vulkan = ["rendy-util/gfx-backend-vulkan"]
+no-slow-safety-checks = ["rendy-util/no-slow-safety-checks"]
+profiler = ["thread_profiler/thread_profiler"]
 
 [dependencies]
-rendy-memory = { version = "0.1", path = "../memory" }
-rendy-resource = { version = "0.1", path = "../resource" }
-rendy-command = { version = "0.1", path = "../command" }
-rendy-wsi = { version = "0.1", path = "../wsi" }
-rendy-util = { version = "0.1", path = "../util" }
+rendy-memory = { version = "0.2.0", path = "../memory" }
+rendy-resource = { version = "0.2.0", path = "../resource" }
+rendy-command = { version = "0.2.0", path = "../command" }
+rendy-descriptor = { version = "0.2.0", path = "../descriptor" }
+rendy-wsi = { version = "0.2.0", path = "../wsi" }
+rendy-util = { version = "0.2.0", path = "../util" }
 
-gfx-hal = "0.1"
-gfx-backend-empty = { version = "0.1.0", optional = true }
-gfx-backend-dx12 = { version = "0.1.0", optional = true }
-gfx-backend-metal = { version = "0.1.0", optional = true }
-gfx-backend-vulkan = { version = "0.1.0", optional = true }
-
+gfx-hal = "0.2"
 derivative = "1.0"
 either = "1.0"
 failure = "0.1"
@@ -43,4 +40,4 @@ parking_lot = "0.7"
 relevant = { version = "0.4", features = ["log", "backtrace"] }
 serde = { version = "1.0", optional = true, features = ["derive"] }
 smallvec = "0.6"
-winit = "0.18"
+thread_profiler = "0.3"

@@ -12,14 +12,22 @@
 use rendy::{
     command::{Families, QueueId, RenderPassEncoder},
     factory::{Config, Factory},
-    graph::{present::PresentNode, render::*, Graph, GraphBuilder, NodeBuffer, NodeImage},
-    memory::MemoryUsageValue,
-    mesh::{AsVertex, PosColor},
-    resource::buffer::Buffer,
-    shader::{Shader, ShaderKind, SourceLanguage, StaticShaderInfo},
+    graph::{
+        present::PresentNode, render::*, Graph, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
+    },
+    hal,
+    memory::Dynamic,
+    mesh::PosColor,
+    resource::{Buffer, BufferInfo, DescriptorSetLayout, Escape, Handle},
+    shader::{SourceShaderInfo, ShaderKind, SourceLanguage, SpirvShader},
+    wsi::winit::{EventsLoop, WindowBuilder},
 };
 
-use winit::{EventsLoop, WindowBuilder};
+#[cfg(feature = "spirv-reflection")]
+use rendy::shader::SpirvReflection;
+
+#[cfg(not(feature = "spirv-reflection"))]
+use rendy::mesh::AsVertex;
 
 #[cfg(feature = "dx12")]
 type Backend = rendy::dx12::Backend;
@@ -31,89 +39,81 @@ type Backend = rendy::metal::Backend;
 type Backend = rendy::vulkan::Backend;
 
 lazy_static::lazy_static! {
-    static ref VERTEX: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/triangle/shader.vert"),
+    static ref VERTEX: SpirvShader = SourceShaderInfo::new(
+        include_str!("shader.vert"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/triangle/shader.vert").into(),
         ShaderKind::Vertex,
         SourceLanguage::GLSL,
         "main",
-    );
+    ).precompile().unwrap();
 
-    static ref FRAGMENT: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/triangle/shader.frag"),
+    static ref FRAGMENT: SpirvShader = SourceShaderInfo::new(
+        include_str!("shader.frag"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/triangle/shader.frag").into(),
         ShaderKind::Fragment,
         SourceLanguage::GLSL,
         "main",
-    );
+    ).precompile().unwrap();
+
+    static ref SHADERS: rendy::shader::ShaderSetBuilder = rendy::shader::ShaderSetBuilder::default()
+        .with_vertex(&*VERTEX).unwrap()
+        .with_fragment(&*FRAGMENT).unwrap();
+}
+
+#[cfg(feature = "spirv-reflection")]
+lazy_static::lazy_static! {
+    static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
 }
 
 #[derive(Debug, Default)]
 struct TriangleRenderPipelineDesc;
 
 #[derive(Debug)]
-struct TriangleRenderPipeline<B: gfx_hal::Backend> {
-    vertex: Option<Buffer<B>>,
+struct TriangleRenderPipeline<B: hal::Backend> {
+    vertex: Option<Escape<Buffer<B>>>,
 }
 
 impl<B, T> SimpleGraphicsPipelineDesc<B, T> for TriangleRenderPipelineDesc
 where
-    B: gfx_hal::Backend,
+    B: hal::Backend,
     T: ?Sized,
 {
     type Pipeline = TriangleRenderPipeline<B>;
 
-    fn vertices(
-        &self,
-    ) -> Vec<(
-        Vec<gfx_hal::pso::Element<gfx_hal::format::Format>>,
-        gfx_hal::pso::ElemStride,
-        gfx_hal::pso::InstanceRate,
-    )> {
-        vec![PosColor::VERTEX.gfx_vertex_input_desc(0)]
-    }
-
-    fn depth_stencil(&self) -> Option<gfx_hal::pso::DepthStencilDesc> {
+    fn depth_stencil(&self) -> Option<hal::pso::DepthStencilDesc> {
         None
     }
 
-    fn load_shader_set<'a>(
+    fn load_shader_set(&self, factory: &mut Factory<B>, _aux: &T) -> rendy_shader::ShaderSet<B> {
+        SHADERS.build(factory, Default::default()).unwrap()
+    }
+
+    fn vertices(
         &self,
-        storage: &'a mut Vec<B::ShaderModule>,
-        factory: &mut Factory<B>,
-        _aux: &mut T,
-    ) -> gfx_hal::pso::GraphicsShaderSet<'a, B> {
-        storage.clear();
+    ) -> Vec<(
+        Vec<hal::pso::Element<hal::format::Format>>,
+        hal::pso::ElemStride,
+        hal::pso::VertexInputRate,
+    )> {
+        #[cfg(feature = "spirv-reflection")]
+        return vec![SHADER_REFLECTION
+            .attributes_range(..)
+            .unwrap()
+            .gfx_vertex_input_desc(hal::pso::VertexInputRate::Vertex)];
 
-        log::trace!("Load shader module '{:#?}'", *VERTEX);
-        storage.push(VERTEX.module(factory).unwrap());
-
-        log::trace!("Load shader module '{:#?}'", *FRAGMENT);
-        storage.push(FRAGMENT.module(factory).unwrap());
-
-        gfx_hal::pso::GraphicsShaderSet {
-            vertex: gfx_hal::pso::EntryPoint {
-                entry: "main",
-                module: &storage[0],
-                specialization: gfx_hal::pso::Specialization::default(),
-            },
-            fragment: Some(gfx_hal::pso::EntryPoint {
-                entry: "main",
-                module: &storage[1],
-                specialization: gfx_hal::pso::Specialization::default(),
-            }),
-            hull: None,
-            domain: None,
-            geometry: None,
-        }
+        #[cfg(not(feature = "spirv-reflection"))]
+        return vec![PosColor::vertex().gfx_vertex_input_desc(hal::pso::VertexInputRate::Vertex)];
     }
 
     fn build<'a>(
         self,
+        _ctx: &GraphContext<B>,
         _factory: &mut Factory<B>,
         _queue: QueueId,
-        _aux: &mut T,
-        buffers: Vec<NodeBuffer<'a, B>>,
-        images: Vec<NodeImage<'a, B>>,
-        set_layouts: &[B::DescriptorSetLayout],
+        _aux: &T,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
+        set_layouts: &[Handle<DescriptorSetLayout<B>>],
     ) -> Result<TriangleRenderPipeline<B>, failure::Error> {
         assert!(buffers.is_empty());
         assert!(images.is_empty());
@@ -125,7 +125,7 @@ where
 
 impl<B, T> SimpleGraphicsPipeline<B, T> for TriangleRenderPipeline<B>
 where
-    B: gfx_hal::Backend,
+    B: hal::Backend,
     T: ?Sized,
 {
     type Desc = TriangleRenderPipelineDesc;
@@ -134,16 +134,24 @@ where
         &mut self,
         factory: &Factory<B>,
         _queue: QueueId,
-        _set_layouts: &[B::DescriptorSetLayout],
+        _set_layouts: &[Handle<DescriptorSetLayout<B>>],
         _index: usize,
         _aux: &T,
     ) -> PrepareResult {
         if self.vertex.is_none() {
+            #[cfg(feature = "spirv-reflection")]
+            let vbuf_size = SHADER_REFLECTION.attributes_range(..).unwrap().stride as u64 * 3;
+
+            #[cfg(not(feature = "spirv-reflection"))]
+            let vbuf_size = PosColor::vertex().stride as u64 * 3;
+
             let mut vbuf = factory
                 .create_buffer(
-                    512,
-                    PosColor::VERTEX.stride as u64 * 3,
-                    (gfx_hal::buffer::Usage::VERTEX, MemoryUsageValue::Dynamic),
+                    BufferInfo {
+                        size: vbuf_size,
+                        usage: hal::buffer::Usage::VERTEX,
+                    },
+                    Dynamic,
                 )
                 .unwrap();
 
@@ -189,7 +197,7 @@ where
         encoder.draw(0..3, 0..1);
     }
 
-    fn dispose(self, _factory: &mut Factory<B>, _aux: &mut T) {}
+    fn dispose(self, _factory: &mut Factory<B>, _aux: &T) {}
 }
 
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
@@ -207,7 +215,7 @@ fn run(
     for _ in &mut frames {
         factory.maintain(families);
         event_loop.poll_events(|_| ());
-        graph.run(factory, families, &mut ());
+        graph.run(factory, families, &());
 
         elapsed = started.elapsed();
         if elapsed >= std::time::Duration::new(5, 0) {
@@ -224,14 +232,13 @@ fn run(
         frames.start * 1_000_000_000 / elapsed_ns
     );
 
-    graph.dispose(factory, &mut ());
+    graph.dispose(factory, &());
     Ok(())
 }
 
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Warn)
         .filter_module("triangle", log::LevelFilter::Trace)
         .init();
 
@@ -248,18 +255,20 @@ fn main() {
 
     event_loop.poll_events(|_| ());
 
-    let surface = factory.create_surface(window.into());
+    let surface = factory.create_surface(&window);
 
     let mut graph_builder = GraphBuilder::<Backend, ()>::new();
 
+    let size = window
+        .get_inner_size()
+        .unwrap()
+        .to_physical(window.get_hidpi_factor());
+
     let color = graph_builder.create_image(
-        surface.kind(),
+        hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1),
         1,
         factory.get_surface_format(&surface),
-        MemoryUsageValue::Data,
-        Some(gfx_hal::command::ClearValue::Color(
-            [1.0, 1.0, 1.0, 1.0].into(),
-        )),
+        Some(hal::command::ClearValue::Color([1.0, 1.0, 1.0, 1.0].into())),
     );
 
     let pass = graph_builder.add_node(
@@ -272,7 +281,7 @@ fn main() {
     graph_builder.add_node(PresentNode::builder(&factory, surface, color).with_dependency(pass));
 
     let graph = graph_builder
-        .build(&mut factory, &mut families, &mut ())
+        .build(&mut factory, &mut families, &())
         .unwrap();
 
     run(&mut event_loop, &mut factory, &mut families, graph).unwrap();

@@ -3,29 +3,16 @@ use {
     crate::{
         command::{QueueId, RenderPassEncoder},
         factory::Factory,
+        graph::GraphContext,
         node::{
             render::PrepareResult, BufferAccess, DescBuilder, ImageAccess, NodeBuffer, NodeImage,
         },
+        resource::{DescriptorSetLayout, Handle},
     },
     gfx_hal::{Backend, Device},
 };
 
-/// Set layout
-#[derive(Clone, Debug, Default)]
-pub struct SetLayout {
-    /// Set layout bindings.
-    pub bindings: Vec<gfx_hal::pso::DescriptorSetLayoutBinding>,
-}
-
-/// Pipeline layout
-#[derive(Clone, Debug)]
-pub struct Layout {
-    /// Sets in pipeline layout.
-    pub sets: Vec<SetLayout>,
-
-    /// Push constants in pipeline layout.
-    pub push_constants: Vec<(gfx_hal::pso::ShaderStageFlags, std::ops::Range<u32>)>,
-}
+pub use crate::util::types::{Layout, SetLayout};
 
 /// Pipeline info
 #[derive(Clone, Debug)]
@@ -37,7 +24,7 @@ pub struct Pipeline {
     pub vertices: Vec<(
         Vec<gfx_hal::pso::Element<gfx_hal::format::Format>>,
         gfx_hal::pso::ElemStride,
-        gfx_hal::pso::InstanceRate,
+        gfx_hal::pso::VertexInputRate,
     )>,
 
     /// Colors for pipeline.
@@ -45,10 +32,23 @@ pub struct Pipeline {
 
     /// Depth stencil for pipeline.
     pub depth_stencil: gfx_hal::pso::DepthStencilDesc,
+
+    /// Primitive to use in the input assembler.
+    pub input_assembler_desc: gfx_hal::pso::InputAssemblerDesc,
 }
 
+/// Descriptor for simple graphics pipeline implementation.
 pub trait SimpleGraphicsPipelineDesc<B: Backend, T: ?Sized>: std::fmt::Debug {
+    /// Simple graphics pipeline implementation
     type Pipeline: SimpleGraphicsPipeline<B, T>;
+
+    /// Make simple render group builder.
+    fn builder(self) -> DescBuilder<B, T, SimpleRenderGroupDesc<Self>>
+    where
+        Self: Sized,
+    {
+        SimpleRenderGroupDesc { inner: self }.builder()
+    }
 
     /// Get set or buffer resources the node uses.
     fn buffers(&self) -> Vec<BufferAccess> {
@@ -86,7 +86,7 @@ pub trait SimpleGraphicsPipelineDesc<B: Backend, T: ?Sized>: std::fmt::Debug {
     ) -> Vec<(
         Vec<gfx_hal::pso::Element<gfx_hal::format::Format>>,
         gfx_hal::pso::ElemStride,
-        gfx_hal::pso::InstanceRate,
+        gfx_hal::pso::VertexInputRate,
     )> {
         Vec::new()
     }
@@ -100,6 +100,14 @@ pub trait SimpleGraphicsPipelineDesc<B: Backend, T: ?Sized>: std::fmt::Debug {
         }
     }
 
+    /// Returns the InputAssemblerDesc. Defaults to a TriangleList with Restart disabled, can be overriden.
+    fn input_assembler(&self) -> gfx_hal::pso::InputAssemblerDesc {
+        gfx_hal::pso::InputAssemblerDesc {
+            primitive: gfx_hal::Primitive::TriangleList,
+            primitive_restart: gfx_hal::pso::PrimitiveRestart::Disabled,
+        }
+    }
+
     /// Graphics pipelines
     fn pipeline(&self) -> Pipeline {
         Pipeline {
@@ -109,36 +117,31 @@ pub trait SimpleGraphicsPipelineDesc<B: Backend, T: ?Sized>: std::fmt::Debug {
             depth_stencil: self
                 .depth_stencil()
                 .unwrap_or(gfx_hal::pso::DepthStencilDesc::default()),
+            input_assembler_desc: self.input_assembler(),
         }
     }
 
     /// Load shader set.
-    /// This function should create required shader modules and fill `GraphicsShaderSet` structure.
+    /// This function should utilize the provided `ShaderSetBuilder` reflection class and return the compiled `ShaderSet`.
     ///
     /// # Parameters
-    ///
-    /// `storage`   - vector where this function can store loaded modules to give them required lifetime.
     ///
     /// `factory`   - factory to create shader modules.
     ///
     /// `aux`       - auxiliary data container. May be anything the implementation desires.
     ///
-    fn load_shader_set<'a>(
-        &self,
-        storage: &'a mut Vec<B::ShaderModule>,
-        factory: &mut Factory<B>,
-        aux: &mut T,
-    ) -> gfx_hal::pso::GraphicsShaderSet<'a, B>;
+    fn load_shader_set(&self, factory: &mut Factory<B>, aux: &T) -> rendy_shader::ShaderSet<B>;
 
     /// Build pass instance.
     fn build<'a>(
         self,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         queue: QueueId,
-        aux: &mut T,
-        buffers: Vec<NodeBuffer<'a, B>>,
-        images: Vec<NodeImage<'a, B>>,
-        set_layouts: &[B::DescriptorSetLayout],
+        aux: &T,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
+        set_layouts: &[Handle<DescriptorSetLayout<B>>],
     ) -> Result<Self::Pipeline, failure::Error>;
 }
 
@@ -146,6 +149,7 @@ pub trait SimpleGraphicsPipelineDesc<B: Backend, T: ?Sized>: std::fmt::Debug {
 pub trait SimpleGraphicsPipeline<B: Backend, T: ?Sized>:
     std::fmt::Debug + Sized + Send + Sync + 'static
 {
+    /// This pipeline descriptor.
     type Desc: SimpleGraphicsPipelineDesc<B, T, Pipeline = Self>;
 
     /// Make simple render group builder.
@@ -153,10 +157,7 @@ pub trait SimpleGraphicsPipeline<B: Backend, T: ?Sized>:
     where
         Self::Desc: Default,
     {
-        SimpleRenderGroupDesc {
-            inner: Self::Desc::default(),
-        }
-        .builder()
+        Self::Desc::default().builder()
     }
 
     /// Prepare to record drawing commands.
@@ -166,7 +167,7 @@ pub trait SimpleGraphicsPipeline<B: Backend, T: ?Sized>:
         &mut self,
         _factory: &Factory<B>,
         _queue: QueueId,
-        _set_layouts: &[B::DescriptorSetLayout],
+        _set_layouts: &[Handle<DescriptorSetLayout<B>>],
         _index: usize,
         _aux: &T,
     ) -> PrepareResult {
@@ -182,17 +183,20 @@ pub trait SimpleGraphicsPipeline<B: Backend, T: ?Sized>:
         aux: &T,
     );
 
-    fn dispose(self, factory: &mut Factory<B>, aux: &mut T);
+    /// Free all resources and destroy pipeline instance.
+    fn dispose(self, factory: &mut Factory<B>, aux: &T);
 }
 
+/// Render group that consist of simple graphics pipeline.
 #[derive(Debug)]
 pub struct SimpleRenderGroup<B: Backend, P> {
-    set_layouts: Vec<B::DescriptorSetLayout>,
+    set_layouts: Vec<Handle<DescriptorSetLayout<B>>>,
     pipeline_layout: B::PipelineLayout,
     graphics_pipeline: B::GraphicsPipeline,
     pipeline: P,
 }
 
+/// Descriptor for simple render group.
 #[derive(Debug)]
 pub struct SimpleRenderGroupDesc<P: std::fmt::Debug> {
     inner: P,
@@ -222,19 +226,19 @@ where
 
     fn build<'a>(
         self,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         queue: QueueId,
-        aux: &mut T,
+        aux: &T,
         framebuffer_width: u32,
         framebuffer_height: u32,
         subpass: gfx_hal::pass::Subpass<'_, B>,
-        buffers: Vec<NodeBuffer<'a, B>>,
-        images: Vec<NodeImage<'a, B>>,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
     ) -> Result<Box<dyn RenderGroup<B, T>>, failure::Error> {
-        let mut shaders = Vec::new();
-
         log::trace!("Load shader sets for");
-        let shader_set = self.inner.load_shader_set(&mut shaders, factory, aux);
+
+        let mut shader_set = self.inner.load_shader_set(factory, aux);
 
         let pipeline = self.inner.pipeline();
 
@@ -242,18 +246,27 @@ where
             .layout
             .sets
             .into_iter()
-            .map(|set| unsafe {
+            .map(|set| {
                 factory
-                    .device()
-                    .create_descriptor_set_layout(set.bindings, std::iter::empty::<B::Sampler>())
+                    .create_descriptor_set_layout(set.bindings)
+                    .map(Handle::from)
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                shader_set.dispose(factory);
+                e
+            })?;
 
         let pipeline_layout = unsafe {
-            factory
-                .device()
-                .create_pipeline_layout(&set_layouts, pipeline.layout.push_constants)
-        }?;
+            factory.device().create_pipeline_layout(
+                set_layouts.iter().map(|l| l.raw()),
+                pipeline.layout.push_constants,
+            )
+        }
+        .map_err(|e| {
+            shader_set.dispose(factory);
+            e
+        })?;
 
         assert_eq!(pipeline.colors.len(), self.inner.colors().len());
 
@@ -271,17 +284,22 @@ where
             h: framebuffer_height as i16,
         };
 
+        let shaders = match shader_set.raw() {
+            Err(e) => {
+                shader_set.dispose(factory);
+                return Err(e);
+            }
+            Ok(s) => s,
+        };
+
         let graphics_pipeline = unsafe {
             factory.device().create_graphics_pipelines(
                 Some(gfx_hal::pso::GraphicsPipelineDesc {
-                    shaders: shader_set,
+                    shaders,
                     rasterizer: gfx_hal::pso::Rasterizer::FILL,
                     vertex_buffers,
                     attributes,
-                    input_assembler: gfx_hal::pso::InputAssemblerDesc {
-                        primitive: gfx_hal::Primitive::TriangleList,
-                        primitive_restart: gfx_hal::pso::PrimitiveRestart::Disabled,
-                    },
+                    input_assembler: pipeline.input_assembler_desc,
                     blender: gfx_hal::pso::BlendDesc {
                         logic_op: None,
                         targets: pipeline.colors.clone(),
@@ -305,15 +323,21 @@ where
                 None,
             )
         }
-        .remove(0)?;
+        .remove(0)
+        .map_err(|e| {
+            shader_set.dispose(factory);
+            e
+        })?;
 
         let pipeline = self
             .inner
-            .build(factory, queue, aux, buffers, images, &set_layouts)?;
+            .build(ctx, factory, queue, aux, buffers, images, &set_layouts)
+            .map_err(|e| {
+                shader_set.dispose(factory);
+                e
+            })?;
 
-        for module in shaders.into_iter() {
-            unsafe { factory.destroy_shader_module(module) };
-        }
+        shader_set.dispose(factory);
 
         Ok(Box::new(SimpleRenderGroup::<B, _> {
             set_layouts,
@@ -354,7 +378,7 @@ where
             .draw(&self.pipeline_layout, encoder, index, aux);
     }
 
-    fn dispose(self: Box<Self>, factory: &mut Factory<B>, aux: &mut T) {
+    fn dispose(self: Box<Self>, factory: &mut Factory<B>, aux: &T) {
         self.pipeline.dispose(factory, aux);
 
         unsafe {
@@ -364,9 +388,7 @@ where
             factory
                 .device()
                 .destroy_pipeline_layout(self.pipeline_layout);
-            for set_layout in self.set_layouts.into_iter() {
-                factory.device().destroy_descriptor_set_layout(set_layout);
-            }
+            drop(self.set_layouts);
         }
     }
 }
@@ -374,7 +396,7 @@ where
 fn push_vertex_desc(
     elements: &[gfx_hal::pso::Element<gfx_hal::format::Format>],
     stride: gfx_hal::pso::ElemStride,
-    rate: gfx_hal::pso::InstanceRate,
+    rate: gfx_hal::pso::VertexInputRate,
     vertex_buffers: &mut Vec<gfx_hal::pso::VertexBufferDesc>,
     attributes: &mut Vec<gfx_hal::pso::AttributeDesc>,
 ) {

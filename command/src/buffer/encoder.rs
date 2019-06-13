@@ -12,7 +12,9 @@ use {
     },
 };
 
-/// Draw command for indirect draw.
+/// Draw command for [`draw_indirect`].
+///
+/// [`draw_indirect`]: ../struct.RenderPassEncoder.html#method.draw_indirect
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct DrawCommand {
@@ -29,7 +31,9 @@ pub struct DrawCommand {
     pub first_instance: u32,
 }
 
-/// Draw command for indirect indexed draw.
+/// Draw command for [`draw_indexed_indirect`].
+///
+/// [`draw_indexed_indirect`]: ../struct.RenderPassEncoder.html#method.draw_indexed_indirect
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct DrawIndexedCommand {
@@ -78,6 +82,11 @@ where
     B: gfx_hal::Backend,
 {
     /// Bind index buffer.
+    /// Last bound index buffer is used in [`draw_indexed`] command.
+    ///
+    /// Note that `draw*` commands available only inside renderpass.
+    ///
+    /// [`draw_indexed`]: ../struct.RenderPassEncoder.html#method.draw_indexed
     pub fn bind_index_buffer<'b>(
         &mut self,
         buffer: &'b B::Buffer,
@@ -101,6 +110,12 @@ where
     }
 
     /// Bind vertex buffers.
+    /// Last bound vertex buffer is used in [`draw`] and [`draw_indexed`] commands.
+    ///
+    /// Note that `draw*` commands available only inside renderpass.
+    ///
+    /// [`draw`]: ../struct.RenderPassEncoder.html#method.draw
+    /// [`draw_indexed`]: ../struct.RenderPassEncoder.html#method.draw_indexed
     pub fn bind_vertex_buffers<'b>(
         &mut self,
         first_binding: u32,
@@ -120,6 +135,11 @@ where
     }
 
     /// Bind graphics pipeline.
+    ///
+    /// Last bound vertex buffer is used in [`draw`], [`draw_indexed`], [`draw_indirect`] and [`draw_indexed_indirect`] commands.
+    ///
+    /// [`draw_indexed_indirect`]: ../struct.RenderPassEncoder.html#method.draw_indexed_indirect
+    /// [`draw_indirect`]: ../struct.RenderPassEncoder.html#method.draw_indirect
     pub fn bind_graphics_pipeline(&mut self, pipeline: &B::GraphicsPipeline)
     where
         C: Supports<Graphics>,
@@ -221,6 +241,18 @@ where
         }
     }
 
+    /// Set scissors
+    pub fn set_scissors<'b>(
+        &mut self,
+        first_scissor: u32,
+        rects: impl IntoIterator<Item = &'b gfx_hal::pso::Rect>,
+    ) where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        unsafe { gfx_hal::command::RawCommandBuffer::set_scissors(self.raw, first_scissor, rects) }
+    }
+
     /// Reborrow encoder.
     pub fn reborrow<K>(&mut self) -> EncoderCommon<'_, B, K>
     where
@@ -287,7 +319,7 @@ where
     }
 
     /// Draw indirect.
-    /// Similar to [`draw`] except takes vertices and indices from `buffer` at specified `offset`.
+    /// Similar to [`draw`] except takes vertices and instance data from `buffer` at specified `offset`.
     /// `buffer` must contain `draw_count` of [`DrawCommand`] starting from `offset` with `stride` bytes between each.
     ///
     /// [`draw`]: trait.RenderPassInlineEncoder.html#tymethod.draw
@@ -304,12 +336,12 @@ where
         }
     }
 
-    /// Draw indirect.
-    /// Similar to [`draw`] except takes vertices and indices from `buffer` at specified `offset`.
-    /// `buffer` must contain `draw_count` of [`DrawCommand`] starting from `offset` with `stride` bytes between each.
+    /// Draw indirect with indices.
+    /// Similar to [`draw_indexed`] except takes vertices, indices and instance data from `buffer` at specified `offset`.
+    /// `buffer` must contain `draw_count` of [`DrawIndexedCommand`] starting from `offset` with `stride` bytes between each.
     ///
-    /// [`draw`]: trait.RenderPassInlineEncoder.html#tymethod.draw
-    /// [`DrawCommand`]: struct.DrawCommand.html
+    /// [`draw`]: trait.RenderPassInlineEncoder.html#tymethod.draw_indexed
+    /// [`DrawIndexedCommand`]: struct.DrawIndexedCommand.html
     pub fn draw_indexed_indirect(
         &mut self,
         buffer: &B::Buffer,
@@ -660,6 +692,33 @@ where
                 src_layout,
                 dst,
                 dst_layout,
+                regions,
+            )
+        }
+    }
+
+    /// Blit image regions, potentially using specified filter when resize is necessary.
+    pub fn blit_image(
+        &mut self,
+        src: &B::Image,
+        src_layout: gfx_hal::image::Layout,
+        dst: &B::Image,
+        dst_layout: gfx_hal::image::Layout,
+        filter: gfx_hal::image::Filter,
+        regions: impl IntoIterator<Item = gfx_hal::command::ImageBlit>,
+    ) where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+
+        unsafe {
+            gfx_hal::command::RawCommandBuffer::blit_image(
+                self.inner.raw,
+                src,
+                src_layout,
+                dst,
+                dst_layout,
+                filter,
                 regions,
             )
         }

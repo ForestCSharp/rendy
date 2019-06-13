@@ -1,37 +1,128 @@
 use {
     crate::{
         chain,
-        command::{Families, QueueId},
+        command::{Families, FamilyId, QueueId},
         factory::Factory,
         frame::{Fences, Frame, Frames},
-        memory::MemoryUsageValue,
-        node::{DynNode, NodeBuilder},
-        resource::{buffer, image},
+        memory::Data,
+        node::{BufferBarrier, DynNode, ImageBarrier, NodeBuffer, NodeBuilder, NodeImage},
+        resource::{Buffer, BufferInfo, Handle, Image, ImageInfo},
+        util::{device_owned, DeviceId},
         BufferId, ImageId, NodeId,
     },
-    gfx_hal::Backend,
+    gfx_hal::{queue::QueueFamilyId, Backend},
+    thread_profiler::profile_scope,
 };
-
-// TODO: Use actual limits.
-const UNIVERSAL_ALIGNMENT: u64 = 512;
 
 #[derive(Debug)]
 struct GraphNode<B: Backend, T: ?Sized> {
     node: Box<dyn DynNode<B, T>>,
-    queue: QueueId,
+    queue: (usize, usize),
 }
 
 /// Graph that renders whole frame.
 #[derive(Debug)]
 pub struct Graph<B: Backend, T: ?Sized> {
+    device: DeviceId,
     nodes: Vec<GraphNode<B, T>>,
     schedule: chain::Schedule<chain::SyncData<usize, usize>>,
     semaphores: Vec<B::Semaphore>,
-    buffers: Vec<buffer::Buffer<B>>,
-    images: Vec<image::Image<B>>,
     frames: Frames<B>,
     fences: Vec<Fences<B>>,
     inflight: u32,
+    ctx: GraphContext<B>,
+}
+
+device_owned!(Graph<B, T: ?Sized>);
+
+/// Graphics context contains all transient resources managed by graph.
+#[derive(Debug)]
+pub struct GraphContext<B: Backend> {
+    buffers: Vec<Option<Handle<Buffer<B>>>>,
+    images: Vec<Option<(Handle<Image<B>>, Option<gfx_hal::command::ClearValue>)>>,
+    /// Number of potential frames in flight
+    pub frames_in_flight: u32,
+}
+
+impl<B: Backend> GraphContext<B> {
+    fn alloc<'a>(
+        factory: &Factory<B>,
+        chains: &chain::Chains,
+        buffers: impl IntoIterator<Item = &'a BufferInfo>,
+        images: impl IntoIterator<Item = &'a (ImageInfo, Option<gfx_hal::command::ClearValue>)>,
+        frames_in_flight: u32,
+    ) -> Result<Self, failure::Error> {
+        profile_scope!("alloc");
+
+        log::trace!("Allocate buffers");
+        let buffers: Vec<Option<Handle<Buffer<B>>>> = buffers
+            .into_iter()
+            .enumerate()
+            .map(|(index, info)| {
+                chains
+                    .buffers
+                    .get(&chain::Id(index))
+                    .map(|buffer| {
+                        factory
+                            .create_buffer(
+                                BufferInfo {
+                                    usage: buffer.usage(),
+                                    ..info.clone()
+                                },
+                                Data,
+                            )
+                            .map(|buffer| Some(buffer.into()))
+                    })
+                    .unwrap_or(Ok(None))
+            })
+            .collect::<Result<_, _>>()?;
+
+        log::trace!("Allocate images");
+        let images: Vec<Option<(Handle<Image<B>>, _)>> = images
+            .into_iter()
+            .enumerate()
+            .map(|(index, (info, clear))| {
+                chains
+                    .images
+                    .get(&chain::Id(index))
+                    .map(|image| {
+                        factory
+                            .create_image(
+                                ImageInfo {
+                                    usage: image.usage(),
+                                    ..info.clone()
+                                },
+                                Data,
+                            )
+                            .map(|image| Some((image.into(), *clear)))
+                    })
+                    .unwrap_or(Ok(None))
+            })
+            .collect::<Result<_, _>>()?;
+
+        Ok(Self { buffers, images, frames_in_flight })
+    }
+
+    /// Get reference to transient image by id.
+    pub fn get_image(&self, id: ImageId) -> Option<&Handle<Image<B>>> {
+        self.get_image_with_clear(id).map(|(i, _)| i)
+    }
+
+    /// Get reference to transient image and clear value by id.
+    pub fn get_image_with_clear(
+        &self,
+        id: ImageId,
+    ) -> Option<(&Handle<Image<B>>, Option<gfx_hal::command::ClearValue>)> {
+        self.images
+            .get(id.0)
+            .and_then(|x| x.as_ref())
+            .map(|&(ref x, ref y)| (&*x, *y))
+    }
+
+    /// Get reference to transient buffer by id.
+    pub fn get_buffer(&self, id: BufferId) -> Option<&Handle<Buffer<B>>> {
+        self.buffers.get(id.0).and_then(|x| x.as_ref()).map(|x| &*x)
+    }
 }
 
 impl<B, T> Graph<B, T>
@@ -41,23 +132,11 @@ where
 {
     /// Perform graph execution.
     /// Run every node of the graph and submit resulting command buffers to the queues.
-    ///
-    /// # Parameters
-    ///
-    /// `command_queues`   - function to get `CommandQueue` by `QueueFamilyId` and index.
-    ///               `Graph` guarantees that it will submit only command buffers
-    ///               allocated from the command pool associated with specified `QueueFamilyId`.
-    ///
-    /// `device`    - `Device<B>` implementation. `B::Device` or wrapper.
-    ///
-    /// `aux`       - auxiliary data that `Node`s use.
-    ///
-    /// `fences`    - vector of fences that will be signaled after all commands are complete.
-    ///               Fences that are attached to last submissions of every queue are reset.
-    ///               This function may not use all fences. Unused fences are left in signaled state.
-    ///               If this function needs more fences they will be allocated from `device` and pushed to this `Vec`.
-    ///               So it's OK to start with empty `Vec`.
     pub fn run(&mut self, factory: &mut Factory<B>, families: &mut Families<B>, aux: &T) {
+        profile_scope!("run");
+
+        self.assert_device_owner(factory.device());
+
         if self.frames.next().index() >= self.inflight as _ {
             let wait = Frame::with_index(self.frames.next().index() - self.inflight as u64);
             let ref mut self_fences = self.fences;
@@ -82,7 +161,7 @@ where
                 .expect("Submission references node with out of bound index");
             debug_assert_eq!(
                 (qid.family(), qid.index()),
-                (queue.family(), queue.index()),
+                (QueueFamilyId(queue.0), queue.1),
                 "Node's queue doesn't match schedule"
             );
 
@@ -99,8 +178,9 @@ where
 
             unsafe {
                 node.run(
+                    &self.ctx,
                     factory,
-                    families.family_mut(queue.family()).queue_mut(queue.index()),
+                    families.family_by_index_mut(queue.0).queue_mut(queue.1),
                     aux,
                     &self.frames,
                     &submission
@@ -135,18 +215,27 @@ where
         }
 
         fences.truncate(fences_used);
-        unsafe {
-            self.frames.advance(fences);
-        }
+        self.frames.advance(fences);
     }
 
     /// Get queue that will exeute given node.
     pub fn node_queue(&self, node: NodeId) -> QueueId {
-        self.nodes[node.0].queue
+        let (f, i) = self.nodes[node.0].queue;
+        QueueId {
+            family: FamilyId {
+                device: self.device,
+                index: f,
+            },
+            index: i,
+        }
     }
 
     /// Dispose of the `Graph`.
-    pub fn dispose(self, factory: &mut Factory<B>, data: &mut T) {
+    pub fn dispose(self, factory: &mut Factory<B>, data: &T) {
+        profile_scope!("dispose");
+
+        self.assert_device_owner(factory.device());
+
         assert!(factory.wait_idle().is_ok());
         self.frames.dispose(factory);
 
@@ -160,6 +249,11 @@ where
                 factory.destroy_semaphore(semaphore);
             }
         }
+        drop(self.device);
+        drop(self.schedule);
+        drop(self.fences);
+        drop(self.inflight);
+        drop(self.ctx);
     }
 }
 
@@ -167,12 +261,8 @@ where
 #[derive(Debug)]
 pub struct GraphBuilder<B: Backend, T: ?Sized> {
     nodes: Vec<Box<dyn NodeBuilder<B, T>>>,
-    buffers: Vec<(buffer::Info, MemoryUsageValue)>,
-    images: Vec<(
-        image::Info,
-        MemoryUsageValue,
-        Option<gfx_hal::command::ClearValue>,
-    )>,
+    buffers: Vec<BufferInfo>,
+    images: Vec<(ImageInfo, Option<gfx_hal::command::ClearValue>)>,
     frames_in_flight: u32,
 }
 
@@ -192,14 +282,13 @@ where
     }
 
     /// Create new buffer owned by graph.
-    pub fn create_buffer(&mut self, size: u64, memory: MemoryUsageValue) -> BufferId {
-        self.buffers.push((
-            buffer::Info {
-                size,
-                usage: gfx_hal::buffer::Usage::empty(),
-            },
-            memory,
-        ));
+    pub fn create_buffer(&mut self, size: u64) -> BufferId {
+        profile_scope!("create_buffer");
+
+        self.buffers.push(BufferInfo {
+            size,
+            usage: gfx_hal::buffer::Usage::empty(),
+        });
         BufferId(self.buffers.len() - 1)
     }
 
@@ -209,11 +298,12 @@ where
         kind: gfx_hal::image::Kind,
         levels: gfx_hal::image::Level,
         format: gfx_hal::format::Format,
-        memory: MemoryUsageValue,
         clear: Option<gfx_hal::command::ClearValue>,
     ) -> ImageId {
+        profile_scope!("create_image");
+
         self.images.push((
-            image::Info {
+            ImageInfo {
                 kind,
                 levels,
                 format,
@@ -221,7 +311,6 @@ where
                 view_caps: gfx_hal::image::ViewCapabilities::empty(),
                 usage: gfx_hal::image::Usage::empty(),
             },
-            memory,
             clear,
         ));
         ImageId(self.images.len() - 1)
@@ -229,6 +318,8 @@ where
 
     /// Add node to the graph.
     pub fn add_node<N: NodeBuilder<B, T> + 'static>(&mut self, builder: N) -> NodeId {
+        profile_scope!("add_node");
+
         self.nodes.push(Box::new(builder));
         NodeId(self.nodes.len() - 1)
     }
@@ -247,71 +338,42 @@ where
     ///
     /// `families`      - `Iterator` of `B::QueueFamily`s.
     ///
-    /// `device`    - `Device<B>` implementation. `B::Device` or wrapper.
+    /// `device`    - `Device<B>` implementation. `Device<B>` or wrapper.
     ///
     /// `aux`       - auxiliary data that `Node`s use.
     pub fn build(
         self,
         factory: &mut Factory<B>,
         families: &mut Families<B>,
-        aux: &mut T,
+        aux: &T,
     ) -> Result<Graph<B, T>, failure::Error> {
-        log::trace!("Schedule nodes execution");
-        let chain_nodes: Vec<chain::Node> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, b)| make_chain_node(&**b, i, factory, families))
-            .collect();
+        profile_scope!("build");
 
-        let chains = chain::collect(chain_nodes, |id| families.family(id).as_slice().len());
+        log::trace!("Schedule nodes execution");
+        let chain_nodes: Vec<chain::Node> = {
+            profile_scope!("schedule_nodes");
+            self.nodes
+                .iter()
+                .enumerate()
+                .map(|(i, b)| make_chain_node(&**b, i, factory, families))
+                .collect()
+        };
+
+        let chains = chain::collect(chain_nodes, |id| {
+            families.family_by_index(id.0).as_slice().len()
+        });
         log::trace!("Scheduled nodes execution {:#?}", chains);
 
-        log::trace!("Allocate buffers");
-        let mut buffers: Vec<Option<buffer::Buffer<B>>> = self
-            .buffers
-            .iter()
-            .enumerate()
-            .map(|(index, &(ref info, memory))| {
-                chains
-                    .buffers
-                    .get(&chain::Id(index))
-                    .map(|buffer| {
-                        factory
-                            .create_buffer(UNIVERSAL_ALIGNMENT, info.size, (buffer.usage(), memory))
-                            .map(|buffer| Some(buffer))
-                    })
-                    .unwrap_or(Ok(None))
-            })
-            .collect::<Result<_, _>>()?;
-
-        log::trace!("Allocate images");
-        let mut images: Vec<Option<(image::Image<B>, _)>> = self
-            .images
-            .iter()
-            .enumerate()
-            .map(|(index, (info, memory, clear))| {
-                chains
-                    .images
-                    .get(&chain::Id(index))
-                    .map(|image| {
-                        factory
-                            .create_image(
-                                UNIVERSAL_ALIGNMENT,
-                                info.kind,
-                                info.levels,
-                                info.format,
-                                info.tiling,
-                                info.view_caps,
-                                (image.usage(), *memory),
-                            )
-                            .map(|image| Some((image, *clear)))
-                    })
-                    .unwrap_or(Ok(None))
-            })
-            .collect::<Result<_, _>>()?;
+        let mut ctx = GraphContext::alloc(
+            factory,
+            &chains,
+            &self.buffers,
+            &self.images,
+            self.frames_in_flight,
+        )?;
 
         log::trace!("Synchronize");
+
         let mut semaphores = 0..;
         let mut schedule = chain::sync(&chains, || {
             let id = semaphores.next().unwrap();
@@ -323,26 +385,31 @@ where
         log::trace!("Build nodes");
         let mut built_nodes: Vec<_> = (0..self.nodes.len()).map(|_| None).collect();
         let mut node_descs: Vec<_> = self.nodes.into_iter().map(Some).collect();
-        for family in schedule.iter() {
-            log::trace!("For family {:#?}", family);
-            for queue in family.iter() {
-                log::trace!("For queue {:#?}", queue.id());
-                for submission in queue.iter() {
-                    log::trace!("For submission {:#?}", submission.id());
-                    let builder = node_descs[submission.node()].take().unwrap();
-                    log::trace!("Build node {:#?}", builder);
-                    let node = builder.build_impl(
-                        factory,
-                        families.family_mut(family.id()),
-                        queue.id().index(),
-                        aux,
-                        &mut buffers,
-                        &mut images,
-                        &chains,
-                        &submission,
-                    )?;
-                    log::debug!("Node built: {:#?}", node);
-                    built_nodes[submission.node()] = Some((node, submission.id().queue()));
+
+        {
+            profile_scope!("build_nodes");
+
+            for family in schedule.iter() {
+                log::trace!("For family {:#?}", family);
+                for queue in family.iter() {
+                    log::trace!("For queue {:#?}", queue.id());
+                    for submission in queue.iter() {
+                        log::trace!("For submission {:#?}", submission.id());
+                        let builder = node_descs[submission.node()].take().unwrap();
+                        log::trace!("Build node {:#?}", builder);
+                        let node = build_node(
+                            &mut ctx,
+                            builder,
+                            factory,
+                            families.family_by_index_mut(family.id().0),
+                            queue.id().index(),
+                            aux,
+                            &chains,
+                            &submission,
+                        )?;
+                        log::debug!("Node built: {:#?}", node);
+                        built_nodes[submission.node()] = Some((node, submission.id().queue()));
+                    }
                 }
             }
         }
@@ -353,27 +420,110 @@ where
             .collect::<Result<_, _>>()?;
 
         Ok(Graph {
+            device: factory.device().id(),
+            ctx,
             nodes: built_nodes
                 .into_iter()
                 .map(Option::unwrap)
                 .map(|(node, qid)| GraphNode {
                     node,
-                    queue: QueueId(qid.family(), qid.index()),
+                    queue: (qid.family().0, qid.index()),
                 })
                 .collect(),
             schedule,
             semaphores,
-            buffers: buffers.into_iter().filter_map(|x| x).collect(),
-            images: images
-                .into_iter()
-                .filter_map(|x| x)
-                .map(|(image, _)| image)
-                .collect(),
             inflight: self.frames_in_flight,
             frames: Frames::new(),
             fences: Vec::new(),
         })
     }
+}
+
+fn build_node<'a, B: Backend, T: ?Sized>(
+    ctx: &GraphContext<B>,
+    builder: Box<dyn NodeBuilder<B, T>>,
+    factory: &mut Factory<B>,
+    family: &mut rendy_command::Family<B>,
+    queue: usize,
+    aux: &T,
+    chains: &chain::Chains,
+    submission: &chain::Submission<chain::SyncData<usize, usize>>,
+) -> Result<Box<dyn DynNode<B, T>>, failure::Error> {
+    let mut buffer_ids: Vec<_> = builder.buffers().into_iter().map(|(id, _)| id).collect();
+    buffer_ids.sort();
+    buffer_ids.dedup();
+
+    let buffers: Vec<_> = buffer_ids
+        .into_iter()
+        .map(|id| {
+            let chain_id = chain::Id(id.0);
+            let sync = submission.sync();
+            let buffer = ctx
+                .get_buffer(id)
+                .expect("Buffer referenced from at least one node must be instantiated");
+            NodeBuffer {
+                id,
+                range: 0..buffer.size(),
+                acquire: sync.acquire.buffers.get(&chain_id).map(
+                    |chain::Barrier { states, families }| BufferBarrier {
+                        states: states.start.0..states.end.0,
+                        stages: states.start.2..states.end.2,
+                        families: families.clone(),
+                    },
+                ),
+                release: sync.release.buffers.get(&chain_id).map(
+                    |chain::Barrier { states, families }| BufferBarrier {
+                        states: states.start.0..states.end.0,
+                        stages: states.start.2..states.end.2,
+                        families: families.clone(),
+                    },
+                ),
+            }
+        })
+        .collect();
+
+    let mut image_ids: Vec<_> = builder.images().into_iter().map(|(id, _)| id).collect();
+    image_ids.sort();
+    image_ids.dedup();
+
+    let images: Vec<_> = image_ids
+        .into_iter()
+        .map(|id| {
+            let chain_id = chain::Id(id.0);
+            let sync = submission.sync();
+            let link = submission.image_link_index(chain_id);
+            let (image, clear) = ctx
+                .get_image_with_clear(id)
+                .expect("Image referenced from at least one node must be instantiated");
+            NodeImage {
+                id,
+                range: gfx_hal::image::SubresourceRange {
+                    aspects: image.format().surface_desc().aspects,
+                    levels: 0..image.levels(),
+                    layers: 0..image.layers(),
+                },
+                layout: chains.images[&chain_id].links()[link]
+                    .submission_state(submission.id())
+                    .layout,
+                clear: if link == 0 { clear } else { None },
+                acquire: sync.acquire.images.get(&chain_id).map(
+                    |chain::Barrier { states, families }| ImageBarrier {
+                        states: (states.start.0, states.start.1)..(states.end.0, states.end.1),
+                        stages: states.start.2..states.end.2,
+                        families: families.clone(),
+                    },
+                ),
+                release: sync.release.images.get(&chain_id).map(
+                    |chain::Barrier { states, families }| ImageBarrier {
+                        states: (states.start.0, states.start.1)..(states.end.0, states.end.1),
+                        stages: states.start.2..states.end.2,
+                        families: families.clone(),
+                    },
+                ),
+            }
+        })
+        .collect();
+    builder.build(ctx, factory, family, queue, aux, buffers, images)
 }
 
 fn make_chain_node<B, T>(
@@ -390,7 +540,7 @@ where
     let images = builder.images();
     chain::Node {
         id,
-        family: builder.family(factory, families.as_slice()).unwrap(),
+        family: QueueFamilyId(builder.family(factory, families.as_slice()).unwrap().index),
         dependencies: builder.dependencies().into_iter().map(|id| id.0).collect(),
         buffers: buffers
             .into_iter()

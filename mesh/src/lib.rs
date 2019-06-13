@@ -6,7 +6,7 @@
 //! vertex attributes required by shader interface.
 //!
 
-#[warn(
+#![warn(
     missing_debug_implementations,
     missing_copy_implementations,
     missing_docs,
@@ -18,11 +18,12 @@
 )]
 use rendy_command as command;
 use rendy_factory as factory;
+use rendy_memory as memory;
 use rendy_resource as resource;
 use rendy_util as util;
 
 mod format;
 mod mesh;
-mod vertex;
 
-pub use crate::{format::*, mesh::*, vertex::*};
+pub use crate::{format::*, mesh::*};
+pub use util::types::vertex::*;

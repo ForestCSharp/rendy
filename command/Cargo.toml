@@ -1,18 +1,24 @@
 [package]
 name = "rendy-command"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["omni-viral <scareaangel@gmail.com>"]
 edition = "2018"
-repository = "https://github.com/omni-viral/rendy"
+repository = "https://github.com/amethyst/rendy"
 license = "MIT OR Apache-2.0"
 documentation = "https://docs.rs/rendy-command"
 keywords = ["graphics", "gfx-hal", "rendy"]
 categories = ["rendering"]
 description = "Rendy's queues and commands tools"
 
+[features]
+no-slow-safety-checks = ["rendy-util/no-slow-safety-checks"]
+profiler = ["thread_profiler/thread_profiler"]
+
 [dependencies]
-gfx-hal = "0.1"
+gfx-hal = "0.2"
 derivative = "1.0"
 failure = "0.1"
 relevant = { version = "0.4", features = ["log", "backtrace"] }
 smallvec = "0.6"
+rendy-util = { version = "0.2.0", path = "../util" }
+thread_profiler = "0.3"

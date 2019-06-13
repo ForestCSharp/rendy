@@ -1,10 +1,18 @@
-use crate::{pixel, TextureBuilder};
+//! Module that turns an image into a `Texture`
+
+use crate::{pixel, MipLevels, TextureBuilder};
 use derivative::Derivative;
+
+use std::num::NonZeroU8;
+
+// reexport for easy usage in ImageTextureConfig
+pub use image::ImageFormat;
 
 #[derive(Derivative, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derivative(Default)]
 pub enum Repr {
+    Float,
     Unorm,
     Inorm,
     Uscaled,
@@ -15,50 +23,15 @@ pub enum Repr {
     Srgb,
 }
 
-/// Determines the way layers are being stored in source image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum LayerLayout {
-    Row,
-    Column,
-}
-
-struct DataLayout {
-    /// distance between lines in texels
-    pub line_stride: u32,
-    /// distance between layers/planes in texels
-    pub layer_stride: u32,
-}
-
-impl LayerLayout {
-    fn layer_width(&self, image_width: u32, layers: u32) -> u32 {
-        match self {
-            LayerLayout::Row => image_width / layers,
-            LayerLayout::Column => image_width,
-        }
-    }
-
-    fn layer_height(&self, image_height: u32, layers: u32) -> u32 {
-        match self {
-            LayerLayout::Row => image_height,
-            LayerLayout::Column => image_height / layers,
-        }
-    }
-
-    fn data_layout(&self, image_width: u32, image_height: u32, layers: u32) -> DataLayout {
-        match self {
-            LayerLayout::Row => DataLayout {
-                line_stride: image_width,
-                layer_stride: image_width / layers,
-            },
-            LayerLayout::Column => DataLayout {
-                line_stride: image_width,
-                layer_stride: image_width * image_height / layers,
-            },
-        }
-    }
-}
-
+/// A description how to interpret loaded texture.
+/// Defines the dimensionality and layer count of textures to load.
+///
+/// When loading more than one layer, the loaded image is vertically
+/// divided into mutiple subimages. The layer width is preserved and
+/// it's height is a fraction of image's original height.
+///
+/// 1D arrays are treated as a sequence of rows, each being an array entry.
+/// 1D images are treated as a single sequence of pixels.
 #[derive(Derivative, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derivative(Default)]
@@ -66,83 +39,32 @@ pub enum TextureKind {
     D1,
     D1Array,
     #[derivative(Default)]
-    D2 {
-        #[derivative(Default(value = "1"))]
-        samples: u8,
-    },
+    D2,
     D2Array {
-        samples: u8,
         layers: u16,
-        layout: LayerLayout,
     },
     D3 {
         depth: u32,
-        layout: LayerLayout,
     },
-    Cube {
-        layout: LayerLayout,
-    },
+    Cube,
     CubeArray {
         layers: u16,
-        layout: LayerLayout,
     },
 }
 
 impl TextureKind {
-    fn layout_and_kind(&self, width: u32, height: u32) -> (gfx_hal::image::Kind, DataLayout) {
+    fn gfx_kind(&self, width: u32, height: u32) -> gfx_hal::image::Kind {
         use gfx_hal::image::Kind::*;
         match self {
-            TextureKind::D1 => (
-                D1(width * height, 1),
-                LayerLayout::Column.data_layout(width * height, 1, 1),
-            ),
-            TextureKind::D1Array => (
-                D1(width, height as u16),
-                LayerLayout::Column.data_layout(width, 1, height),
-            ),
-            TextureKind::D2 { samples } => (
-                D2(width, height, 1, *samples),
-                LayerLayout::Column.data_layout(width, height, 1),
-            ),
-            TextureKind::D2Array {
-                samples,
-                layers,
-                layout,
-            } => (
-                D2(
-                    layout.layer_width(width, *layers as u32),
-                    layout.layer_height(height, *layers as u32),
-                    *layers,
-                    *samples,
-                ),
-                layout.data_layout(width, height, *layers as u32),
-            ),
-            TextureKind::D3 { depth, layout } => (
-                D3(
-                    layout.layer_width(width, *depth),
-                    layout.layer_height(height, *depth),
-                    *depth,
-                ),
-                layout.data_layout(width, height, *depth),
-            ),
-            TextureKind::Cube { layout } => (
-                D2(
-                    layout.layer_width(width, 6),
-                    layout.layer_height(height, 6),
-                    6,
-                    1,
-                ),
-                layout.data_layout(width, height, 6),
-            ),
-            TextureKind::CubeArray { layers, layout } => (
-                D2(
-                    layout.layer_width(width, *layers as u32 * 6),
-                    layout.layer_height(height, *layers as u32 * 6),
-                    layers * 6,
-                    1,
-                ),
-                layout.data_layout(width, height, *layers as u32 * 6),
-            ),
+            TextureKind::D1 => D1(width * height, 1),
+            TextureKind::D1Array => D1(width, height as u16),
+            TextureKind::D2 => D2(width, height, 1, 1),
+            TextureKind::D2Array { layers } => D2(width, height / *layers as u32, *layers, 1),
+            TextureKind::D3 { depth } => D3(width, height / *depth, *depth),
+            TextureKind::Cube => D2(width, height / 6, 6, 1),
+            TextureKind::CubeArray { layers } => {
+                D2(width, height / (*layers as u32 * 6), layers * 6, 1)
+            }
         }
     }
 
@@ -161,22 +83,32 @@ impl TextureKind {
 }
 
 #[derive(Derivative, Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(default)
+)]
 #[derivative(Default)]
 pub struct ImageTextureConfig {
     /// Interpret the image as given format.
     /// When `None`, format is determined automatically based on magic bytes.
     /// Automatic method doesn't support TGA format.
     #[cfg_attr(feature = "serde", serde(with = "serde_image_format"))]
-    format: Option<image::ImageFormat>,
-    repr: Repr,
-    kind: TextureKind,
-    #[derivative(Default(value = "gfx_hal::image::Filter::Linear"))]
-    filter: gfx_hal::image::Filter,
+    pub format: Option<ImageFormat>,
+    pub repr: Repr,
+    pub kind: TextureKind,
+    #[derivative(Default(
+        value = "gfx_hal::image::SamplerInfo::new(gfx_hal::image::Filter::Linear, gfx_hal::image::WrapMode::Clamp)"
+    ))]
+    pub sampler_info: gfx_hal::image::SamplerInfo,
+    #[derivative(Default(value = "false"))]
+    /// Automatically generate mipmaps for this image
+    pub generate_mips: bool,
 }
 
 #[cfg(feature = "serde")]
 mod serde_image_format {
+    //! Module for enabline serde to serialize and deserialize image formats
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Serialize, Deserialize)]
@@ -217,6 +149,7 @@ macro_rules! dyn_format {
     };
     ($channel:ident, $size:ident, $repr:expr) => {{
         match $repr {
+            Repr::Float => unimplemented!(),
             Repr::Unorm => dyn_format!($channel, $size, Unorm),
             Repr::Inorm => dyn_format!($channel, $size, Inorm),
             Repr::Uscaled => dyn_format!($channel, $size, Uscaled),
@@ -228,60 +161,97 @@ macro_rules! dyn_format {
     }};
 }
 
-pub fn load_from_image(
-    bytes: &[u8],
+/// Attempts to load a Texture from an image.
+pub fn load_from_image<R>(
+    mut reader: R,
     config: ImageTextureConfig,
-) -> Result<TextureBuilder<'static>, failure::Error> {
+) -> Result<TextureBuilder<'static>, failure::Error>
+where
+    R: std::io::BufRead + std::io::Seek,
+{
     use gfx_hal::format::{Component, Swizzle};
     use image::{DynamicImage, GenericImageView};
 
-    let image_format = config
-        .format
-        .map_or_else(|| image::guess_format(bytes), |f| Ok(f))?;
-    let image = image::load_from_memory_with_format(bytes, image_format)?;
+    let image_format = config.format.map_or_else(
+        || {
+            let r = reader.by_ref();
+            // Longest size of image crate supported magic bytes
+            let mut format_magic_bytes = [0u8; 10];
+            r.read_exact(&mut format_magic_bytes)?;
+            r.seek(std::io::SeekFrom::Current(-10))?;
+            image::guess_format(&format_magic_bytes)
+        },
+        |f| Ok(f),
+    )?;
 
-    let (w, h) = image.dimensions();
-    let (kind, layout) = config.kind.layout_and_kind(w, h);
+    let (w, h, vec, format, swizzle) = match (image_format, config.repr) {
+        (image::ImageFormat::HDR, Repr::Float) => {
+            let decoder = image::hdr::HDRDecoder::new(reader)?;
+            let metadata = decoder.metadata();
+            let (w, h) = (metadata.width, metadata.height);
 
-    let (vec, format, swizzle) = match image {
-        DynamicImage::ImageLuma8(img) => (
-            img.into_vec(),
-            dyn_format!(R, _8, config.repr),
-            Swizzle(Component::R, Component::R, Component::R, Component::One),
-        ),
-        DynamicImage::ImageLumaA8(img) => (
-            img.into_vec(),
-            dyn_format!(Rg, _8, config.repr),
-            Swizzle(Component::R, Component::R, Component::R, Component::G),
-        ),
-        DynamicImage::ImageRgb8(img) => (
-            img.into_vec(),
-            dyn_format!(Rgb, _8, config.repr),
-            Swizzle::NO,
-        ),
-        DynamicImage::ImageRgba8(img) => (
-            img.into_vec(),
-            dyn_format!(Rgba, _8, config.repr),
-            Swizzle::NO,
-        ),
-        DynamicImage::ImageBgr8(img) => (
-            img.into_vec(),
-            dyn_format!(Bgr, _8, config.repr),
-            Swizzle::NO,
-        ),
-        DynamicImage::ImageBgra8(img) => (
-            img.into_vec(),
-            dyn_format!(Bgra, _8, config.repr),
-            Swizzle::NO,
-        ),
+            let format = gfx_hal::format::Format::Rgb32Sfloat;
+            let vec = crate::util::cast_vec(decoder.read_image_hdr()?);
+            let swizzle = Swizzle::NO;
+            (w, h, vec, format, swizzle)
+        }
+        _ => {
+            let image = image::load(reader, image_format)?;
+
+            let (w, h) = image.dimensions();
+
+            let (vec, format, swizzle) = match image {
+                DynamicImage::ImageLuma8(img) => (
+                    img.into_vec(),
+                    dyn_format!(R, _8, config.repr),
+                    Swizzle(Component::R, Component::R, Component::R, Component::One),
+                ),
+                DynamicImage::ImageLumaA8(img) => (
+                    img.into_vec(),
+                    dyn_format!(Rg, _8, config.repr),
+                    Swizzle(Component::R, Component::R, Component::R, Component::G),
+                ),
+                DynamicImage::ImageRgb8(img) => (
+                    img.into_vec(),
+                    dyn_format!(Rgb, _8, config.repr),
+                    Swizzle::NO,
+                ),
+                DynamicImage::ImageRgba8(img) => (
+                    img.into_vec(),
+                    dyn_format!(Rgba, _8, config.repr),
+                    Swizzle::NO,
+                ),
+                DynamicImage::ImageBgr8(img) => (
+                    img.into_vec(),
+                    dyn_format!(Bgr, _8, config.repr),
+                    Swizzle::NO,
+                ),
+                DynamicImage::ImageBgra8(img) => (
+                    img.into_vec(),
+                    dyn_format!(Bgra, _8, config.repr),
+                    Swizzle::NO,
+                ),
+            };
+            (w, h, vec, format, swizzle)
+        }
+    };
+
+    let kind = config.kind.gfx_kind(w, h);
+    let extent = kind.extent();
+
+    let mips = if config.generate_mips {
+        MipLevels::GenerateAuto
+    } else {
+        MipLevels::RawLevels(NonZeroU8::new(1).unwrap())
     };
 
     Ok(TextureBuilder::new()
         .with_raw_data(vec, format)
         .with_swizzle(swizzle)
-        .with_data_width(layout.line_stride)
-        .with_data_height(layout.layer_stride)
+        .with_data_width(extent.width)
+        .with_data_height(extent.height)
+        .with_mip_levels(mips)
         .with_kind(kind)
         .with_view_kind(config.kind.view_kind())
-        .with_filter(config.filter))
+        .with_sampler_info(config.sampler_info))
 }

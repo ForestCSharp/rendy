@@ -1,6 +1,6 @@
 //! Window system integration.
 
-#[warn(
+#![warn(
     missing_debug_implementations,
     missing_copy_implementations,
     missing_docs,
@@ -10,160 +10,160 @@
     unused_import_braces,
     unused_qualifications
 )]
-use rendy_resource::{
-    escape::Terminal,
-    image::{Image, Info},
+
+use {
+    gfx_hal::{window::Extent2D, Backend, Device as _},
+    rendy_resource::{Image, ImageInfo},
+    rendy_util::{
+        device_owned, instance_owned, rendy_with_dx12_backend, rendy_with_empty_backend,
+        rendy_with_metal_backend, rendy_with_vulkan_backend, Device, DeviceId, Instance,
+        InstanceId,
+    },
 };
 
-use rendy_memory::MemoryBlock;
+#[cfg(feature = "winit")]
+use rendy_util::rendy_backend_match;
 
-#[cfg(feature = "empty")]
-mod gfx_backend_empty {
-    pub(super) fn create_surface(
-        instance: &gfx_backend_empty::Instance,
-        window: &winit::Window,
-    ) -> gfx_backend_empty::Surface {
-        unimplemented!()
-    }
-}
+#[cfg(feature = "winit")]
+pub use winit;
 
-#[cfg(feature = "metal")]
-mod gfx_backend_metal {
-    pub(super) fn create_surface(
-        instance: &gfx_backend_metal::Instance,
-        window: &winit::Window,
-    ) -> gfx_backend_metal::Surface {
-        instance.create_surface(window)
-    }
-}
-
-#[cfg(feature = "vulkan")]
-mod gfx_backend_vulkan {
-    pub(super) fn create_surface(
-        instance: &gfx_backend_vulkan::Instance,
-        window: &winit::Window,
-    ) -> <gfx_backend_vulkan::Backend as gfx_hal::Backend>::Surface {
-        instance.create_surface(window)
-    }
-}
-
-#[cfg(feature = "dx12")]
-mod gfx_backend_dx12 {
-    pub(super) fn create_surface(
-        instance: &gfx_backend_dx12::Instance,
-        window: &winit::Window,
-    ) -> <gfx_backend_dx12::Backend as gfx_hal::Backend>::Surface {
-        instance.create_surface(window)
-    }
-}
-
-macro_rules! create_surface_for_backend {
-    (match $instance:ident, $window:ident $(| $backend:ident @ $feature:meta)+) => {{
-        #[allow(non_camel_case_types)]
-        enum _B {$(
-            $backend,
-        )+}
-
-        for b in [$(_B::$backend),+].iter() {
-            match b {$(
-                #[$feature]
-                _B::$backend => {
-                    if let Some(instance) = std::any::Any::downcast_ref($instance) {
-                        let surface: Box<dyn std::any::Any> = Box::new(self::$backend::create_surface(instance, $window));
-                        return *surface.downcast().expect(concat!("`", stringify!($backend), "::Backend::Surface` must be `", stringify!($backend), "::Surface`"));
-                    }
-                })+
-                _ => continue,
-            }
+rendy_with_empty_backend! {
+    mod gfx_backend_empty {
+        #[cfg(feature = "winit")]
+        pub(super) fn create_surface(
+            _instance: &rendy_util::empty::Instance,
+            _window: &winit::Window,
+        ) -> rendy_util::empty::Surface {
+            rendy_util::empty::Surface
         }
-        panic!("
-            Undefined backend requested.
-            Make sure feature for required backend is enabled.
-            Try to add `--features=vulkan` or if on macos `--features=metal`.
-        ")
-    }};
-
-    ($instance:ident, $window:ident) => {{
-        create_surface_for_backend!(match $instance, $window
-            | gfx_backend_empty @ cfg(feature = "empty")
-            | gfx_backend_dx12 @ cfg(feature = "dx12")
-            | gfx_backend_metal @ cfg(feature = "metal")
-            | gfx_backend_vulkan @ cfg(feature = "vulkan")
-        );
-    }};
+    }
 }
 
-#[allow(unused_variables)]
-fn create_surface<B: gfx_hal::Backend>(
-    instance: &dyn std::any::Any,
-    window: &winit::Window,
-) -> B::Surface {
-    create_surface_for_backend!(instance, window);
+rendy_with_dx12_backend! {
+    mod gfx_backend_dx12 {
+        #[cfg(feature = "winit")]
+        pub(super) fn create_surface(
+            instance: &rendy_util::dx12::Instance,
+            window: &winit::Window,
+        ) -> <rendy_util::dx12::Backend as gfx_hal::Backend>::Surface {
+            instance.create_surface(window)
+        }
+    }
+}
+
+rendy_with_metal_backend! {
+    mod gfx_backend_metal {
+        #[cfg(feature = "winit")]
+        pub(super) fn create_surface(
+            instance: &rendy_util::metal::Instance,
+            window: &winit::Window,
+        ) -> <rendy_util::metal::Backend as gfx_hal::Backend>::Surface {
+            instance.create_surface(window)
+        }
+    }
+}
+
+rendy_with_vulkan_backend! {
+    mod gfx_backend_vulkan {
+        #[cfg(feature = "winit")]
+        pub(super) fn create_surface(
+            instance: &rendy_util::vulkan::Instance,
+            window: &winit::Window,
+        ) -> <rendy_util::vulkan::Backend as gfx_hal::Backend>::Surface {
+            instance.create_surface(window)
+        }
+    }
+}
+
+#[cfg(feature = "winit")]
+#[allow(unused)]
+fn create_surface<B: Backend>(instance: &Instance<B>, window: &winit::Window) -> B::Surface {
+    use rendy_util::identical_cast;
+
+    // We perform identical type transmute.
+    rendy_backend_match!(B {
+        empty => {
+            identical_cast(gfx_backend_empty::create_surface(instance.raw_typed().unwrap(), window))
+        }
+        dx12 => {
+            identical_cast(gfx_backend_dx12::create_surface(instance.raw_typed().unwrap(), window))
+        }
+        metal => {
+            identical_cast(gfx_backend_metal::create_surface(instance.raw_typed().unwrap(), window))
+        }
+        vulkan => {
+            identical_cast(gfx_backend_vulkan::create_surface(instance.raw_typed().unwrap(), window))
+        }
+    })
 }
 
 /// Rendering target bound to window.
-pub struct Surface<B: gfx_hal::Backend> {
-    window: std::sync::Arc<winit::Window>,
+pub struct Surface<B: Backend> {
     raw: B::Surface,
-    #[cfg(not(feature = "no-slow-safety-checks"))]
-    factory_id: usize,
+    instance: InstanceId,
 }
 
 impl<B> std::fmt::Debug for Surface<B>
 where
-    B: gfx_hal::Backend,
+    B: Backend,
 {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt.debug_struct("Target")
-            .field("window", &self.window.id())
+        fmt.debug_struct("Surface")
+            .field("instance", &self.instance)
             .finish()
+    }
+}
+
+instance_owned!(Surface<B>);
+
+impl<B> Surface<B>
+where
+    B: Backend,
+{
+    /// Create surface for the window.
+    #[cfg(feature = "winit")]
+    pub fn new(instance: &Instance<B>, window: &winit::Window) -> Self {
+        let raw = create_surface::<B>(instance, &window);
+        Surface {
+            raw,
+            instance: instance.id(),
+        }
+    }
+
+    /// Create surface from `instance`.
+    ///
+    /// # Safety
+    ///
+    /// Closure must return surface object created from raw instance provided as closure argument.
+    pub unsafe fn create<T>(instance: &Instance<B>, f: impl FnOnce(&T) -> B::Surface) -> Self
+    where
+        T: gfx_hal::Instance<Backend = B>,
+    {
+        Surface {
+            raw: f(instance.raw_typed().expect("Wrong instance type")),
+            instance: instance.id(),
+        }
     }
 }
 
 impl<B> Surface<B>
 where
-    B: gfx_hal::Backend,
+    B: Backend,
 {
-    /// Create surface for the window.
-    pub fn new(
-        instance: &dyn std::any::Any,
-        window: std::sync::Arc<winit::Window>,
-        _factory_id: usize,
-    ) -> Self {
-        let raw = create_surface::<B>(instance, &window);
-        #[cfg(not(feature = "no-slow-safety-checks"))]
-        let s = Surface { window, raw, factory_id: _factory_id };
-        #[cfg(feature = "no-slow-safety-checks")]
-        let s = Surface { window, raw };
-
-        s
-    }
-
     /// Get raw `B::Surface` reference
     pub fn raw(&self) -> &B::Surface {
         &self.raw
     }
 
-    /// Get factory id that this surface was created from
-    #[cfg(not(feature = "no-slow-safety-checks"))]
-    pub fn factory_id(&self) -> usize {
-        self.factory_id
-    }
-
-    /// Get surface image kind.
-    pub fn kind(&self) -> gfx_hal::image::Kind {
-        gfx_hal::Surface::kind(&self.raw)
-    }
-
-    /// Get width to hight ratio.
-    pub fn aspect(&self) -> f32 {
-        let extent = gfx_hal::Surface::kind(&self.raw).extent();
-        extent.width as f32 / extent.height as f32
+    /// Get current extent of the surface.
+    pub unsafe fn extent(&self, physical_device: &B::PhysicalDevice) -> Option<Extent2D> {
+        let (capabilities, _formats, _present_modes) = self.compatibility(physical_device);
+        capabilities.current_extent
     }
 
     /// Get surface ideal format.
     pub unsafe fn format(&self, physical_device: &B::PhysicalDevice) -> gfx_hal::format::Format {
-        let (_capabilities, formats, _present_modes, _alpha) =
+        let (_capabilities, formats, _present_modes) =
             gfx_hal::Surface::compatibility(&self.raw, physical_device);
         let formats = formats.unwrap();
 
@@ -178,11 +178,11 @@ where
                     desc.bits,
                 )
             })
-            .unwrap()
+            .expect("At least one format must be supported by the surface")
     }
 
     /// Get surface compatibility
-    /// 
+    ///
     /// ## Safety
     /// - `physical_device` must be created from same `Instance` as the `Surface`
     pub unsafe fn compatibility(
@@ -192,7 +192,6 @@ where
         gfx_hal::window::SurfaceCapabilities,
         Option<Vec<gfx_hal::format::Format>>,
         Vec<gfx_hal::PresentMode>,
-        Vec<gfx_hal::CompositeAlpha>
     ) {
         gfx_hal::Surface::compatibility(&self.raw, physical_device)
     }
@@ -201,198 +200,171 @@ where
     pub unsafe fn into_target(
         mut self,
         physical_device: &B::PhysicalDevice,
-        device: &impl gfx_hal::Device<B>,
+        device: &Device<B>,
+        suggest_extent: Extent2D,
         image_count: u32,
         present_mode: gfx_hal::PresentMode,
         usage: gfx_hal::image::Usage,
     ) -> Result<Target<B>, failure::Error> {
-        let (capabilities, formats, present_modes, alpha) = self.compatibility(physical_device);
-
-        if !present_modes.contains(&present_mode) {
-            log::warn!(
-                "Present mode is not supported. Supported: {:#?}, requested: {:#?}",
-                present_modes,
-                present_mode,
-            );
-            failure::bail!("Present mode not supported.");
-        }
-
-        log::info!(
-            "Surface present modes: {:#?}. Pick {:#?}",
-            present_modes,
-            present_mode
+        assert_eq!(
+            device.id().instance,
+            self.instance,
+            "Resource is not owned by specified instance"
         );
 
-        let formats = formats.unwrap();
-
-        let format = *formats
-            .iter()
-            .max_by_key(|format| {
-                let base = format.base_format();
-                let desc = base.0.desc();
-                (
-                    !desc.is_compressed(),
-                    base.1 == gfx_hal::format::ChannelType::Srgb,
-                    desc.bits,
-                )
-            })
-            .unwrap();
-
-        log::info!("Surface formats: {:#?}. Pick {:#?}", formats, format);
-
-        if image_count < capabilities.image_count.start || image_count > capabilities.image_count.end {
-            log::warn!(
-                "Image count not supported. Supported: {:#?}, requested: {:#?}",
-                capabilities.image_count,
-                image_count
-            );
-            failure::bail!("Image count not supported.")
-        }
-
-        log::info!(
-            "Surface capabilities: {:#?}. Pick {} images",
-            capabilities.image_count,
-            image_count
-        );
-
-        assert!(
-            capabilities.usage.contains(usage),
-            "Surface supports {:?}, but {:?} was requested"
-        );
-
-        let extent = capabilities.current_extent.unwrap_or({
-            let hidpi_factor = self.window.get_hidpi_factor();
-            let start = capabilities.extents.start;
-            let end = capabilities.extents.end;
-            let (window_width, window_height) = self
-                .window
-                .get_inner_size()
-                .unwrap()
-                .to_physical(hidpi_factor)
-                .into();
-            gfx_hal::window::Extent2D {
-                width: end.width.min(start.width.max(window_width)),
-                height: end.height.min(start.height.max(window_height)),
-            }
-        });
-
-        let (swapchain, backbuffer) = device.create_swapchain(
-            &mut self.raw,
-            gfx_hal::SwapchainConfig {
-                present_mode,
-                format,
-                extent,
-                image_count,
-                image_layers: 1,
-                image_usage: usage,
-                composite_alpha: alpha.into_iter().max_by_key(|alpha| {
-                    match alpha {
-                        gfx_hal::window::CompositeAlpha::Inherit => 3,
-                        gfx_hal::window::CompositeAlpha::Opaque => 2,
-                        gfx_hal::window::CompositeAlpha::PreMultiplied => 1,
-                        gfx_hal::window::CompositeAlpha::PostMultiplied => 0,
-                    }
-                }).expect("No CompositeAlpha modes supported"),
-            },
-            None,
+        let (swapchain, backbuffer, extent) = create_swapchain(
+            &mut self,
+            physical_device,
+            device,
+            suggest_extent,
+            image_count,
+            present_mode,
+            usage,
         )?;
 
-        let (backbuffer, terminal) = match backbuffer {
-            gfx_hal::Backbuffer::Images(images) => {
-                let terminal = Terminal::new();
-                let backbuffer = Backbuffer::Images(
-                    images
-                        .into_iter()
-                        .map(|image| {
-                            Image::new(
-                                Info {
-                                    kind: gfx_hal::image::Kind::D2(
-                                        extent.width,
-                                        extent.height,
-                                        1,
-                                        1,
-                                    ),
-                                    levels: 1,
-                                    format,
-                                    tiling: gfx_hal::image::Tiling::Optimal,
-                                    view_caps: gfx_hal::image::ViewCapabilities::empty(),
-                                    usage,
-                                },
-                                image,
-                                None,
-                                &terminal,
-                            )
-                        })
-                        .collect(),
-                );
-                (backbuffer, Some(terminal))
-            }
-            gfx_hal::Backbuffer::Framebuffer(raw) => {
-                let backbuffer = Backbuffer::Framebuffer {
-                    raw,
-                    format,
-                    extent,
-                };
-                (backbuffer, None)
-            }
-        };
-
         Ok(Target {
+            device: device.id(),
             relevant: relevant::Relevant,
-            window: self.window,
-            surface: self.raw,
-            swapchain,
-            backbuffer,
-            terminal,
+            surface: self,
+            swapchain: Some(swapchain),
+            backbuffer: Some(backbuffer),
+            extent,
+            present_mode,
+            usage,
         })
-    }
-
-    /// Get a reference to the internal window.
-    pub fn window(&self) -> &winit::Window {
-        &self.window
     }
 }
 
-/// Backbuffer of the `Target`.
-/// Either collection of `Image`s
-/// or framebuffer.
-#[derive(Debug)]
-pub enum Backbuffer<B: gfx_hal::Backend> {
-    /// Collection of images that in the `Target`'s swapchain.
-    Images(Vec<Image<B>>),
+unsafe fn create_swapchain<B: Backend>(
+    surface: &mut Surface<B>,
+    physical_device: &B::PhysicalDevice,
+    device: &Device<B>,
+    suggest_extent: Extent2D,
+    image_count: u32,
+    present_mode: gfx_hal::PresentMode,
+    usage: gfx_hal::image::Usage,
+) -> Result<(B::Swapchain, Vec<Image<B>>, Extent2D), failure::Error> {
+    let (capabilities, formats, present_modes) = surface.compatibility(physical_device);
 
-    /// Framebuffer of the `Target`.
-    Framebuffer {
-        /// Raw framebuffer.
-        /// Can be used with any render-pass.
-        raw: B::Framebuffer,
+    if !present_modes.contains(&present_mode) {
+        log::warn!(
+            "Present mode is not supported. Supported: {:#?}, requested: {:#?}",
+            present_modes,
+            present_mode,
+        );
+        failure::bail!("Present mode not supported.");
+    }
 
-        /// Formats of image in framebuffer.
-        format: gfx_hal::format::Format,
+    log::info!(
+        "Surface present modes: {:#?}. Pick {:#?}",
+        present_modes,
+        present_mode
+    );
 
-        /// Extent of image in framebuffer.
-        extent: gfx_hal::window::Extent2D,
-    },
+    let formats = formats.unwrap();
+
+    let format = *formats
+        .iter()
+        .max_by_key(|format| {
+            let base = format.base_format();
+            let desc = base.0.desc();
+            (
+                !desc.is_compressed(),
+                base.1 == gfx_hal::format::ChannelType::Srgb,
+                desc.bits,
+            )
+        })
+        .unwrap();
+
+    log::info!("Surface formats: {:#?}. Pick {:#?}", formats, format);
+
+    if image_count < capabilities.image_count.start || image_count > capabilities.image_count.end {
+        log::warn!(
+            "Image count not supported. Supported: {:#?}, requested: {:#?}",
+            capabilities.image_count,
+            image_count
+        );
+        failure::bail!("Image count not supported.")
+    }
+
+    log::info!(
+        "Surface capabilities: {:#?}. Pick {} images",
+        capabilities.image_count,
+        image_count
+    );
+
+    assert!(
+        capabilities.usage.contains(usage),
+        "Surface supports {:?}, but {:?} was requested"
+    );
+
+    let extent = capabilities.current_extent.unwrap_or(suggest_extent);
+
+    let (swapchain, images) = device.create_swapchain(
+        &mut surface.raw,
+        gfx_hal::SwapchainConfig {
+            present_mode,
+            format,
+            extent,
+            image_count,
+            image_layers: 1,
+            image_usage: usage,
+            composite_alpha: [
+                gfx_hal::window::CompositeAlpha::INHERIT,
+                gfx_hal::window::CompositeAlpha::OPAQUE,
+                gfx_hal::window::CompositeAlpha::PREMULTIPLIED,
+                gfx_hal::window::CompositeAlpha::POSTMULTIPLIED,
+            ]
+            .iter()
+            .find(|&bit| capabilities.composite_alpha & *bit == *bit)
+            .cloned()
+            .expect("No CompositeAlpha modes supported"),
+        },
+        None,
+    )?;
+
+    let backbuffer = images
+        .into_iter()
+        .map(|image| {
+            Image::create_from_swapchain(
+                device.id(),
+                ImageInfo {
+                    kind: gfx_hal::image::Kind::D2(extent.width, extent.height, 1, 1),
+                    levels: 1,
+                    format,
+                    tiling: gfx_hal::image::Tiling::Optimal,
+                    view_caps: gfx_hal::image::ViewCapabilities::empty(),
+                    usage,
+                },
+                image,
+            )
+        })
+        .collect();
+
+    Ok((swapchain, backbuffer, extent))
 }
 
 /// Rendering target bound to window.
 /// With swapchain created.
-pub struct Target<B: gfx_hal::Backend> {
-    surface: B::Surface,
-    swapchain: B::Swapchain,
-    backbuffer: Backbuffer<B>,
-    terminal: Option<Terminal<(B::Image, Option<MemoryBlock<B>>)>>,
-    window: std::sync::Arc<winit::Window>,
+pub struct Target<B: Backend> {
+    device: DeviceId,
+    surface: Surface<B>,
+    swapchain: Option<B::Swapchain>,
+    backbuffer: Option<Vec<Image<B>>>,
+    extent: Extent2D,
+    present_mode: gfx_hal::PresentMode,
+    usage: gfx_hal::image::Usage,
     relevant: relevant::Relevant,
 }
 
+device_owned!(Target<B>);
+
 impl<B> std::fmt::Debug for Target<B>
 where
-    B: gfx_hal::Backend,
+    B: Backend,
 {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("Target")
-            .field("window", &self.window.id())
             .field("backbuffer", &self.backbuffer)
             .finish()
     }
@@ -400,30 +372,81 @@ where
 
 impl<B> Target<B>
 where
-    B: gfx_hal::Backend,
+    B: Backend,
 {
     /// Dispose of target.
     ///
     /// # Safety
     ///
     /// Swapchain must be not in use.
-    pub unsafe fn dispose(self, device: &impl gfx_hal::Device<B>) {
-        drop(self.backbuffer);
-        self.terminal
-            .map(|mut terminal| terminal.drain().for_each(drop));
+    pub unsafe fn dispose(mut self, device: &Device<B>) -> Surface<B> {
+        self.assert_device_owner(device);
+
+        match self.backbuffer {
+            Some(images) => {
+                images
+                    .into_iter()
+                    .for_each(|image| image.dispose_swapchain_image(device.id()));
+            }
+            _ => {}
+        };
+
         self.relevant.dispose();
-        device.destroy_swapchain(self.swapchain);
-        drop(self.surface);
+        self.swapchain.take().map(|s| device.destroy_swapchain(s));
+        self.surface
     }
 
     /// Get raw surface handle.
-    pub fn surface(&self) -> &B::Surface {
+    pub fn surface(&self) -> &Surface<B> {
         &self.surface
     }
 
     /// Get raw surface handle.
     pub fn swapchain(&self) -> &B::Swapchain {
-        &self.swapchain
+        self.swapchain.as_ref().expect("Swapchain already disposed")
+    }
+
+    /// Recreate swapchain.
+    ///
+    /// #Safety
+    ///
+    /// Current swapchain must be not in use.
+    pub unsafe fn recreate(
+        &mut self,
+        physical_device: &B::PhysicalDevice,
+        device: &Device<B>,
+        suggest_extent: Extent2D,
+    ) -> Result<(), failure::Error> {
+        self.assert_device_owner(device);
+
+        let image_count = match self.backbuffer.take() {
+            Some(images) => {
+                let count = images.len();
+                images
+                    .into_iter()
+                    .for_each(|image| image.dispose_swapchain_image(device.id()));
+                count
+            }
+            None => 0,
+        };
+
+        self.swapchain.take().map(|s| device.destroy_swapchain(s));
+
+        let (swapchain, backbuffer, extent) = create_swapchain(
+            &mut self.surface,
+            physical_device,
+            device,
+            suggest_extent,
+            image_count as u32,
+            self.present_mode,
+            self.usage,
+        )?;
+
+        self.swapchain.replace(swapchain);
+        self.backbuffer.replace(backbuffer);
+        self.extent = extent;
+
+        Ok(())
     }
 
     /// Get swapchain impl trait.
@@ -432,12 +455,24 @@ where
     ///
     /// Trait usage should not violate this type valid usage.
     pub unsafe fn swapchain_mut(&mut self) -> &mut impl gfx_hal::Swapchain<B> {
-        &mut self.swapchain
+        self.swapchain.as_mut().expect("Swapchain already disposed")
     }
 
     /// Get raw handlers for the swapchain images.
-    pub fn backbuffer(&self) -> &Backbuffer<B> {
-        &self.backbuffer
+    pub fn backbuffer(&self) -> &Vec<Image<B>> {
+        self.backbuffer
+            .as_ref()
+            .expect("Swapchain already disposed")
+    }
+
+    /// Get render target size.
+    pub fn extent(&self) -> Extent2D {
+        self.extent
+    }
+
+    /// Get image usage flags.
+    pub fn usage(&self) -> gfx_hal::image::Usage {
+        self.usage
     }
 
     /// Acquire next image.
@@ -446,31 +481,31 @@ where
         signal: &B::Semaphore,
     ) -> Result<NextImages<'_, B>, gfx_hal::AcquireError> {
         let index = gfx_hal::Swapchain::acquire_image(
-            &mut self.swapchain,
+            // Missing swapchain is equivalent to OutOfDate, as it has to be recreated anyway.
+            self.swapchain
+                .as_mut()
+                .ok_or(gfx_hal::AcquireError::OutOfDate)?,
             !0,
-            gfx_hal::FrameSync::Semaphore(signal),
-        )?;
+            Some(signal),
+            None,
+        )?
+        .0;
 
         Ok(NextImages {
             targets: std::iter::once((&*self, index)).collect(),
         })
     }
-
-    /// Get a reference to the internal window.
-    pub fn window(&self) -> &winit::Window {
-        &self.window
-    }
 }
 
 /// Represents acquire frames that will be presented next.
 #[derive(Debug)]
-pub struct NextImages<'a, B: gfx_hal::Backend> {
+pub struct NextImages<'a, B: Backend> {
     targets: smallvec::SmallVec<[(&'a Target<B>, u32); 8]>,
 }
 
 impl<'a, B> NextImages<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: Backend,
 {
     /// Get indices.
     pub fn indices(&self) -> impl IntoIterator<Item = u32> + '_ {
@@ -486,28 +521,60 @@ where
         self,
         queue: &mut impl gfx_hal::queue::RawCommandQueue<B>,
         wait: impl IntoIterator<Item = &'b (impl std::borrow::Borrow<B::Semaphore> + 'b)>,
-    ) -> Result<(), failure::Error>
+    ) -> Result<Option<gfx_hal::window::Suboptimal>, gfx_hal::window::PresentError>
     where
         'a: 'b,
     {
-        queue
-            .present(
-                self.targets
-                    .iter()
-                    .map(|(target, index)| (&target.swapchain, *index)),
-                wait,
-            )
-            .map_err(|()| failure::format_err!("Suboptimal or out of date, or what?"))
+        queue.present(
+            self.targets.iter().map(|(target, index)| {
+                (
+                    target
+                        .swapchain
+                        .as_ref()
+                        .expect("Swapchain already disposed"),
+                    *index,
+                )
+            }),
+            wait,
+        )
     }
 }
 
 impl<'a, B> std::ops::Index<usize> for NextImages<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: Backend,
 {
     type Output = u32;
 
     fn index(&self, index: usize) -> &u32 {
         &self.targets[index].1
     }
+}
+
+/// Resolve into input AST if winit support is enabled.
+#[cfg(feature = "winit")]
+#[macro_export]
+macro_rules! with_winit {
+    ($($t:tt)*) => { $($t)* };
+}
+
+/// Resolve into input AST if winit support is enabled.
+#[cfg(not(feature = "winit"))]
+#[macro_export]
+macro_rules! with_winit {
+    ($($t:tt)*) => {};
+}
+
+/// Resolve into input AST if winit support is disabled.
+#[cfg(not(feature = "winit"))]
+#[macro_export]
+macro_rules! without_winit {
+    ($($t:tt)*) => { $($t)* };
+}
+
+/// Resolve into input AST if winit support is disabled.
+#[cfg(feature = "winit")]
+#[macro_export]
+macro_rules! without_winit {
+    ($($t:tt)*) => {};
 }

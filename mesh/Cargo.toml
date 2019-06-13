@@ -1,9 +1,9 @@
 [package]
 name = "rendy-mesh"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["omni-viral <scareaangel@gmail.com>"]
 edition = "2018"
-repository = "https://github.com/omni-viral/rendy"
+repository = "https://github.com/amethyst/rendy"
 license = "MIT OR Apache-2.0"
 documentation = "https://docs.rs/rendy-mesh"
 keywords = ["graphics", "gfx-hal", "rendy"]
@@ -13,19 +13,22 @@ readme = "README.md"
 
 [features]
 obj = ["wavefront_obj"]
-serde-1 = ["serde", "serde_bytes", "gfx-hal/serde", "smallvec/serde", "rendy-factory/serde"]
+serde-1 = ["serde", "serde_bytes", "gfx-hal/serde", "smallvec/serde", "rendy-factory/serde-1"]
+no-slow-safety-checks = ["rendy-util/no-slow-safety-checks"]
 
 [dependencies]
-rendy-command = { version = "0.1.0", path = "../command" }
-rendy-memory = { version = "0.1.0", path = "../memory" }
-rendy-resource = { version = "0.1.0", path = "../resource" }
-rendy-factory = { version = "0.1.0", path = "../factory" }
-rendy-util = { version = "0.1.0", path = "../util" }
+rendy-command = { version = "0.2.0", path = "../command" }
+rendy-memory = { version = "0.2.0", path = "../memory" }
+rendy-resource = { version = "0.2.0", path = "../resource" }
+rendy-factory = { version = "0.2.0", path = "../factory" }
+rendy-util = { version = "0.2.0", path = "../util" }
 
-gfx-hal = "0.1"
+gfx-hal = "0.2"
 
 failure = "0.1"
 serde = { version = "1.0", optional = true, features = ["derive"] }
 wavefront_obj = { version = "6.0", optional = true }
 smallvec = { version = "0.6" }
-serde_bytes = { version = "0.10.5", optional = true }
+serde_bytes = { version = "0.11", optional = true }
+
+log = "0.4.6"

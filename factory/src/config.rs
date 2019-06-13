@@ -3,6 +3,7 @@ use std::cmp::min;
 use crate::{
     command::FamilyId,
     memory::{DynamicConfig, HeapsConfig, LinearConfig},
+    util::DeviceId,
 };
 
 /// Factory initialization config.
@@ -48,7 +49,11 @@ pub unsafe trait QueuesConfigure {
     type Families: IntoIterator<Item = (FamilyId, Self::Priorities)>;
 
     /// Configure.
-    fn configure(self, families: &[impl gfx_hal::queue::QueueFamily]) -> Self::Families;
+    fn configure(
+        self,
+        device: DeviceId,
+        families: &[impl gfx_hal::queue::QueueFamily],
+    ) -> Self::Families;
 }
 
 /// QueuePicker that picks first graphics queue family.
@@ -69,12 +74,21 @@ unsafe impl QueuesConfigure for OneGraphicsQueue {
     type Families = Option<(FamilyId, [f32; 1])>;
     fn configure(
         self,
+        device: DeviceId,
         families: &[impl gfx_hal::queue::QueueFamily],
     ) -> Option<(FamilyId, [f32; 1])> {
         families
             .iter()
             .find(|f| f.supports_graphics() && f.max_queues() > 0)
-            .map(|f| (f.id(), [1.0]))
+            .map(|f| {
+                (
+                    FamilyId {
+                        device,
+                        index: f.id().0,
+                    },
+                    [1.0],
+                )
+            })
     }
 }
 
@@ -88,11 +102,15 @@ pub struct SavedQueueConfig(Vec<(usize, Vec<f32>)>);
 unsafe impl QueuesConfigure for SavedQueueConfig {
     type Priorities = Vec<f32>;
     type Families = Vec<(FamilyId, Vec<f32>)>;
-    fn configure(self, _: &[impl gfx_hal::queue::QueueFamily]) -> Vec<(FamilyId, Vec<f32>)> {
+    fn configure(
+        self,
+        device: DeviceId,
+        _: &[impl gfx_hal::queue::QueueFamily],
+    ) -> Vec<(FamilyId, Vec<f32>)> {
         // TODO: FamilyId should be stored directly once it become serializable.
         self.0
             .into_iter()
-            .map(|(id, vec)| (gfx_hal::queue::QueueFamilyId(id), vec))
+            .map(|(id, vec)| (FamilyId { device, index: id }, vec))
             .collect()
     }
 }
@@ -138,8 +156,9 @@ unsafe impl HeapsConfigure for BasicHeapsConfigure {
         self,
         properties: &gfx_hal::adapter::MemoryProperties,
     ) -> (Self::Types, Self::Heaps) {
-        let _32mb = 32 * 1024 * 1024;
-        let _256mb = 256 * 1024 * 1024;
+        let _1mb = 1024 * 1024;
+        let _32mb = 32 * _1mb;
+        let _128mb = 128 * _1mb;
 
         let types = properties
             .memory_types
@@ -151,24 +170,21 @@ unsafe impl HeapsConfigure for BasicHeapsConfigure {
                         .contains(gfx_hal::memory::Properties::CPU_VISIBLE)
                     {
                         Some(LinearConfig {
-                            linear_size: min(
-                                _256mb,
-                                properties.memory_heaps[mt.heap_index as usize] / 8,
-                            ),
+                            linear_size: min(_128mb, properties.memory_heaps[mt.heap_index] / 16),
                         })
                     } else {
                         None
                     },
                     dynamic: Some(DynamicConfig {
-                        max_block_size: min(
-                            _32mb,
-                            properties.memory_heaps[mt.heap_index as usize] / 8,
+                        block_size_granularity: 256.min(
+                            (properties.memory_heaps[mt.heap_index] / 4096).next_power_of_two(),
                         ),
-                        block_size_granularity: min(
-                            256,
-                            properties.memory_heaps[mt.heap_index as usize] / 1024,
+                        min_device_allocation: _1mb
+                            .min(properties.memory_heaps[mt.heap_index] / 1048)
+                            .next_power_of_two(),
+                        max_chunk_size: _32mb.min(
+                            (properties.memory_heaps[mt.heap_index] / 128).next_power_of_two(),
                         ),
-                        blocks_per_chunk: 64,
                     }),
                 };
 

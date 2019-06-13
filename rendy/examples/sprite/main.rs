@@ -11,15 +11,25 @@
 use rendy::{
     command::{Families, QueueId, RenderPassEncoder},
     factory::{Config, Factory, ImageState},
-    graph::{present::PresentNode, render::*, Graph, GraphBuilder, NodeBuffer, NodeImage},
-    memory::MemoryUsageValue,
-    mesh::{AsVertex, PosTex},
-    resource::buffer::Buffer,
-    shader::{Shader, ShaderKind, SourceLanguage, StaticShaderInfo},
-    texture::{Texture},
+    graph::{
+        present::PresentNode, render::*, Graph, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
+    },
+    hal::{self, Device as _},
+    memory::Dynamic,
+    mesh::PosTex,
+    resource::{Buffer, BufferInfo, DescriptorSet, DescriptorSetLayout, Escape, Handle},
+    shader::{SourceShaderInfo, ShaderKind, SourceLanguage, SpirvShader},
+    texture::{image::ImageTextureConfig, Texture},
+    wsi::winit::{EventsLoop, WindowBuilder},
 };
 
-use winit::{EventsLoop, WindowBuilder};
+#[cfg(feature = "spirv-reflection")]
+use rendy::shader::SpirvReflection;
+
+#[cfg(not(feature = "spirv-reflection"))]
+use rendy::mesh::AsVertex;
+
+use std::{fs::File, io::BufReader};
 
 #[cfg(feature = "dx12")]
 type Backend = rendy::dx12::Backend;
@@ -31,192 +41,179 @@ type Backend = rendy::metal::Backend;
 type Backend = rendy::vulkan::Backend;
 
 lazy_static::lazy_static! {
-    static ref VERTEX: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/sprite/shader.vert"),
+    static ref VERTEX: SpirvShader = SourceShaderInfo::new(
+        include_str!("shader.vert"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/sprite/shader.vert").into(),
         ShaderKind::Vertex,
         SourceLanguage::GLSL,
         "main",
-    );
+    ).precompile().unwrap();
 
-    static ref FRAGMENT: StaticShaderInfo = StaticShaderInfo::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/sprite/shader.frag"),
+    static ref FRAGMENT: SpirvShader = SourceShaderInfo::new(
+        include_str!("shader.frag"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/sprite/shader.frag").into(),
         ShaderKind::Fragment,
         SourceLanguage::GLSL,
         "main",
-    );
+    ).precompile().unwrap();
+
+    static ref SHADERS: rendy::shader::ShaderSetBuilder = rendy::shader::ShaderSetBuilder::default()
+        .with_vertex(&*VERTEX).unwrap()
+        .with_fragment(&*FRAGMENT).unwrap();
+}
+
+#[cfg(feature = "spirv-reflection")]
+lazy_static::lazy_static! {
+    static ref SHADER_REFLECTION: SpirvReflection = SHADERS.reflect().unwrap();
 }
 
 #[derive(Debug, Default)]
 struct SpriteGraphicsPipelineDesc;
 
 #[derive(Debug)]
-struct SpriteGraphicsPipeline<B: gfx_hal::Backend> {
+struct SpriteGraphicsPipeline<B: hal::Backend> {
     texture: Texture<B>,
-    vbuf: Buffer<B>,
-    descriptor_pool: B::DescriptorPool,
-    descriptor_set: B::DescriptorSet,
+    vbuf: Escape<Buffer<B>>,
+    descriptor_set: Escape<DescriptorSet<B>>,
 }
 
 impl<B, T> SimpleGraphicsPipelineDesc<B, T> for SpriteGraphicsPipelineDesc
 where
-    B: gfx_hal::Backend,
+    B: hal::Backend,
     T: ?Sized,
 {
     type Pipeline = SpriteGraphicsPipeline<B>;
 
-    fn depth_stencil(&self) -> Option<gfx_hal::pso::DepthStencilDesc> {
+    fn depth_stencil(&self) -> Option<hal::pso::DepthStencilDesc> {
         None
+    }
+
+    fn load_shader_set(&self, factory: &mut Factory<B>, _aux: &T) -> rendy_shader::ShaderSet<B> {
+        SHADERS.build(factory, Default::default()).unwrap()
     }
 
     fn vertices(
         &self,
     ) -> Vec<(
-        Vec<gfx_hal::pso::Element<gfx_hal::format::Format>>,
-        gfx_hal::pso::ElemStride,
-        gfx_hal::pso::InstanceRate,
+        Vec<hal::pso::Element<hal::format::Format>>,
+        hal::pso::ElemStride,
+        hal::pso::VertexInputRate,
     )> {
-        vec![PosTex::VERTEX.gfx_vertex_input_desc(0)]
-    }
+        #[cfg(feature = "spirv-reflection")]
+        return vec![SHADER_REFLECTION
+            .attributes_range(..)
+            .unwrap()
+            .gfx_vertex_input_desc(hal::pso::VertexInputRate::Vertex)];
 
-    fn load_shader_set<'b>(
-        &self,
-        storage: &'b mut Vec<B::ShaderModule>,
-        factory: &mut Factory<B>,
-        _aux: &mut T,
-    ) -> gfx_hal::pso::GraphicsShaderSet<'b, B> {
-        storage.clear();
-
-        log::trace!("Load shader module '{:#?}'", *VERTEX);
-        storage.push(VERTEX.module(factory).unwrap());
-
-        log::trace!("Load shader module '{:#?}'", *FRAGMENT);
-        storage.push(FRAGMENT.module(factory).unwrap());
-
-        gfx_hal::pso::GraphicsShaderSet {
-            vertex: gfx_hal::pso::EntryPoint {
-                entry: "main",
-                module: &storage[0],
-                specialization: gfx_hal::pso::Specialization::default(),
-            },
-            fragment: Some(gfx_hal::pso::EntryPoint {
-                entry: "main",
-                module: &storage[1],
-                specialization: gfx_hal::pso::Specialization::default(),
-            }),
-            hull: None,
-            domain: None,
-            geometry: None,
-        }
+        #[cfg(not(feature = "spirv-reflection"))]
+        return vec![PosTex::vertex().gfx_vertex_input_desc(hal::pso::VertexInputRate::Vertex)];
     }
 
     fn layout(&self) -> Layout {
-        Layout {
+        #[cfg(feature = "spirv-reflection")]
+        return SHADER_REFLECTION.layout().unwrap();
+
+        #[cfg(not(feature = "spirv-reflection"))]
+        return Layout {
             sets: vec![SetLayout {
                 bindings: vec![
-                    gfx_hal::pso::DescriptorSetLayoutBinding {
+                    hal::pso::DescriptorSetLayoutBinding {
                         binding: 0,
-                        ty: gfx_hal::pso::DescriptorType::SampledImage,
+                        ty: hal::pso::DescriptorType::SampledImage,
                         count: 1,
-                        stage_flags: gfx_hal::pso::ShaderStageFlags::FRAGMENT,
+                        stage_flags: hal::pso::ShaderStageFlags::FRAGMENT,
                         immutable_samplers: false,
                     },
-                    gfx_hal::pso::DescriptorSetLayoutBinding {
+                    hal::pso::DescriptorSetLayoutBinding {
                         binding: 1,
-                        ty: gfx_hal::pso::DescriptorType::Sampler,
+                        ty: hal::pso::DescriptorType::Sampler,
                         count: 1,
-                        stage_flags: gfx_hal::pso::ShaderStageFlags::FRAGMENT,
+                        stage_flags: hal::pso::ShaderStageFlags::FRAGMENT,
                         immutable_samplers: false,
                     },
                 ],
             }],
             push_constants: Vec::new(),
-        }
+        };
     }
 
     fn build<'b>(
         self,
+        _ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         queue: QueueId,
-        _aux: &mut T,
-        buffers: Vec<NodeBuffer<'b, B>>,
-        images: Vec<NodeImage<'b, B>>,
-        set_layouts: &[B::DescriptorSetLayout],
+        _aux: &T,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
+        set_layouts: &[Handle<DescriptorSetLayout<B>>],
     ) -> Result<SpriteGraphicsPipeline<B>, failure::Error> {
         assert!(buffers.is_empty());
         assert!(images.is_empty());
         assert_eq!(set_layouts.len(), 1);
 
         // This is how we can load an image and create a new texture.
-        let image_bytes = include_bytes!(concat!(
+        let image_reader = BufReader::new(File::open(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/examples/sprite/logo.png"
-        ));
+        ))?);
 
-        let texture_builder = rendy::texture::image::load_from_image(image_bytes, Default::default())?;
+        let texture_builder = rendy::texture::image::load_from_image(
+            image_reader,
+            ImageTextureConfig {
+                generate_mips: true,
+                ..Default::default()
+            },
+        )?;
 
         let texture = texture_builder
             .build(
                 ImageState {
                     queue,
-                    stage: gfx_hal::pso::PipelineStage::FRAGMENT_SHADER,
-                    access: gfx_hal::image::Access::SHADER_READ,
-                    layout: gfx_hal::image::Layout::ShaderReadOnlyOptimal,
+                    stage: hal::pso::PipelineStage::FRAGMENT_SHADER,
+                    access: hal::image::Access::SHADER_READ,
+                    layout: hal::image::Layout::ShaderReadOnlyOptimal,
                 },
                 factory,
             )
             .unwrap();
 
-        let mut descriptor_pool = unsafe {
-            gfx_hal::Device::create_descriptor_pool(
-                factory.device(),
-                1,
-                &[
-                    gfx_hal::pso::DescriptorRangeDesc {
-                        ty: gfx_hal::pso::DescriptorType::SampledImage,
-                        count: 1,
-                    },
-                    gfx_hal::pso::DescriptorRangeDesc {
-                        ty: gfx_hal::pso::DescriptorType::Sampler,
-                        count: 1,
-                    },
-                ],
-            )
-        }
-        .unwrap();
-
-        let descriptor_set = unsafe {
-            gfx_hal::pso::DescriptorPool::allocate_set(&mut descriptor_pool, &set_layouts[0])
-        }
-        .unwrap();
+        let descriptor_set = factory
+            .create_descriptor_set(set_layouts[0].clone())
+            .unwrap();
 
         unsafe {
-            gfx_hal::Device::write_descriptor_sets(
-                factory.device(),
-                vec![
-                    gfx_hal::pso::DescriptorSetWrite {
-                        set: &descriptor_set,
-                        binding: 0,
-                        array_offset: 0,
-                        descriptors: vec![gfx_hal::pso::Descriptor::Image(
-                            texture.image_view.raw(),
-                            gfx_hal::image::Layout::ShaderReadOnlyOptimal,
-                        )],
-                    },
-                    gfx_hal::pso::DescriptorSetWrite {
-                        set: &descriptor_set,
-                        binding: 1,
-                        array_offset: 0,
-                        descriptors: vec![gfx_hal::pso::Descriptor::Sampler(texture.sampler.raw())],
-                    },
-                ],
-            );
+            factory.device().write_descriptor_sets(vec![
+                hal::pso::DescriptorSetWrite {
+                    set: descriptor_set.raw(),
+                    binding: 0,
+                    array_offset: 0,
+                    descriptors: vec![hal::pso::Descriptor::Image(
+                        texture.view().raw(),
+                        hal::image::Layout::ShaderReadOnlyOptimal,
+                    )],
+                },
+                hal::pso::DescriptorSetWrite {
+                    set: descriptor_set.raw(),
+                    binding: 1,
+                    array_offset: 0,
+                    descriptors: vec![hal::pso::Descriptor::Sampler(texture.sampler().raw())],
+                },
+            ]);
         }
+
+        #[cfg(feature = "spirv-reflection")]
+        let vbuf_size = SHADER_REFLECTION.attributes_range(..).unwrap().stride as u64 * 6;
+
+        #[cfg(not(feature = "spirv-reflection"))]
+        let vbuf_size = PosTex::vertex().stride as u64 * 6;
 
         let mut vbuf = factory
             .create_buffer(
-                512,
-                PosTex::VERTEX.stride as u64 * 6,
-                (gfx_hal::buffer::Usage::VERTEX, MemoryUsageValue::Dynamic),
+                BufferInfo {
+                    size: vbuf_size,
+                    usage: hal::buffer::Usage::VERTEX,
+                },
+                Dynamic,
             )
             .unwrap();
 
@@ -256,11 +253,9 @@ where
                 .unwrap();
         }
 
-
         Ok(SpriteGraphicsPipeline {
             texture,
             vbuf,
-            descriptor_pool,
             descriptor_set,
         })
     }
@@ -268,7 +263,7 @@ where
 
 impl<B, T> SimpleGraphicsPipeline<B, T> for SpriteGraphicsPipeline<B>
 where
-    B: gfx_hal::Backend,
+    B: hal::Backend,
     T: ?Sized,
 {
     type Desc = SpriteGraphicsPipelineDesc;
@@ -277,7 +272,7 @@ where
         &mut self,
         _factory: &Factory<B>,
         _queue: QueueId,
-        _set_layouts: &[B::DescriptorSetLayout],
+        _set_layouts: &[Handle<DescriptorSetLayout<B>>],
         _index: usize,
         _aux: &T,
     ) -> PrepareResult {
@@ -294,14 +289,14 @@ where
         encoder.bind_graphics_descriptor_sets(
             layout,
             0,
-            std::iter::once(&self.descriptor_set),
+            std::iter::once(self.descriptor_set.raw()),
             std::iter::empty::<u32>(),
         );
         encoder.bind_vertex_buffers(0, Some((self.vbuf.raw(), 0)));
         encoder.draw(0..6, 0..1);
     }
 
-    fn dispose(self, _factory: &mut Factory<B>, _aux: &mut T) {}
+    fn dispose(self, _factory: &mut Factory<B>, _aux: &T) {}
 }
 
 #[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
@@ -327,7 +322,7 @@ fn run(
     for _ in &mut frames {
         factory.maintain(families);
         event_loop.poll_events(|_| ());
-        graph.run(factory, families, &mut ());
+        graph.run(factory, families, &());
 
         elapsed = started.elapsed();
         if elapsed >= std::time::Duration::new(5, 0) {
@@ -344,14 +339,13 @@ fn run(
         frames.start * 1_000_000_000 / elapsed_ns
     );
 
-    graph.dispose(factory, &mut ());
+    graph.dispose(factory, &());
     Ok(())
 }
 
-#[cfg(all(any(feature = "dx12", feature = "metal", feature = "vulkan"), feature = "texture-image"))]
+#[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Warn)
         .filter_module("sprite", log::LevelFilter::Trace)
         .init();
 
@@ -368,18 +362,20 @@ fn main() {
 
     event_loop.poll_events(|_| ());
 
-    let surface = factory.create_surface(window.into());
+    let surface = factory.create_surface(&window);
 
     let mut graph_builder = GraphBuilder::<Backend, ()>::new();
 
+    let size = window
+        .get_inner_size()
+        .unwrap()
+        .to_physical(window.get_hidpi_factor());
+
     let color = graph_builder.create_image(
-        surface.kind(),
+        hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1),
         1,
-        gfx_hal::format::Format::Rgba8Unorm,
-        MemoryUsageValue::Data,
-        Some(gfx_hal::command::ClearValue::Color(
-            [1.0, 1.0, 1.0, 1.0].into(),
-        )),
+        factory.get_surface_format(&surface),
+        Some(hal::command::ClearValue::Color([1.0, 1.0, 1.0, 1.0].into())),
     );
 
     let pass = graph_builder.add_node(
@@ -392,18 +388,13 @@ fn main() {
     graph_builder.add_node(PresentNode::builder(&factory, surface, color).with_dependency(pass));
 
     let graph = graph_builder
-        .build(&mut factory, &mut families, &mut ())
+        .build(&mut factory, &mut families, &())
         .unwrap();
 
     run(&mut event_loop, &mut factory, &mut families, graph).unwrap();
 }
 
-#[cfg(not(any(feature = "dx12", feature = "metal", feature = "vulkan", feature = "texture-image")))]
+#[cfg(not(any(feature = "dx12", feature = "metal", feature = "vulkan")))]
 fn main() {
     panic!("Specify feature: { dx12, metal, vulkan }");
-}
-
-#[cfg(all(any(feature = "dx12", feature = "metal", feature = "vulkan"), not(feature = "texture-image")))]
-fn main() {
-    panic!("This example require feature \"texture-image\"");
 }

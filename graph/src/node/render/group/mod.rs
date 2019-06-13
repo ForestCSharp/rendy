@@ -6,6 +6,7 @@ use {
     crate::{
         command::{QueueId, RenderPassEncoder},
         factory::Factory,
+        graph::GraphContext,
         node::{
             render::{pass::SubpassBuilder, PrepareResult},
             BufferAccess, DescBuilder, ImageAccess, NodeBuffer, NodeImage,
@@ -15,6 +16,7 @@ use {
     gfx_hal::Backend,
 };
 
+/// Descriptor for render group
 pub trait RenderGroupDesc<B: Backend, T: ?Sized>: std::fmt::Debug {
     /// Make render group builder.
     fn builder(self) -> DescBuilder<B, T, Self>
@@ -30,33 +32,44 @@ pub trait RenderGroupDesc<B: Backend, T: ?Sized>: std::fmt::Debug {
         }
     }
 
-    /// Get buffers used by the group
-    fn buffers(&self) -> Vec<BufferAccess>;
+    /// Get buffers used by the group. Empty by default.
+    fn buffers(&self) -> Vec<BufferAccess> {
+        Vec::new()
+    }
 
-    /// Get images used by the group
-    fn images(&self) -> Vec<ImageAccess>;
+    /// Get images used by the group. Empty by default.
+    fn images(&self) -> Vec<ImageAccess> {
+        Vec::new()
+    }
 
-    /// Number of color output images.
-    fn colors(&self) -> usize;
+    /// Number of color output images. One by default.
+    fn colors(&self) -> usize {
+        1
+    }
 
-    /// Is depth image used.
-    fn depth(&self) -> bool;
+    /// Is depth image used. True by default.
+    fn depth(&self) -> bool {
+        true
+    }
 
     /// Build render group.
     fn build<'a>(
         self,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         queue: QueueId,
-        aux: &mut T,
+        aux: &T,
         framebuffer_width: u32,
         framebuffer_height: u32,
         subpass: gfx_hal::pass::Subpass<'_, B>,
-        buffers: Vec<NodeBuffer<'a, B>>,
-        images: Vec<NodeImage<'a, B>>,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
     ) -> Result<Box<dyn RenderGroup<B, T>>, failure::Error>;
 }
 
+/// One or more graphics pipelines to be called in subpass.
 pub trait RenderGroup<B: Backend, T: ?Sized>: std::fmt::Debug + Send + Sync {
+    /// Prepare resources and data for rendering.
     fn prepare(
         &mut self,
         factory: &Factory<B>,
@@ -66,6 +79,7 @@ pub trait RenderGroup<B: Backend, T: ?Sized>: std::fmt::Debug + Send + Sync {
         aux: &T,
     ) -> PrepareResult;
 
+    /// Record commands.
     fn draw_inline(
         &mut self,
         encoder: RenderPassEncoder<'_, B>,
@@ -74,9 +88,11 @@ pub trait RenderGroup<B: Backend, T: ?Sized>: std::fmt::Debug + Send + Sync {
         aux: &T,
     );
 
-    fn dispose(self: Box<Self>, factory: &mut Factory<B>, aux: &mut T);
+    /// Free all resources and destroy group instance.
+    fn dispose(self: Box<Self>, factory: &mut Factory<B>, aux: &T);
 }
 
+/// Builder fror render group.
 pub trait RenderGroupBuilder<B: Backend, T: ?Sized>: std::fmt::Debug {
     /// Make subpass from render group.
     fn into_subpass(self) -> SubpassBuilder<B, T>
@@ -101,16 +117,18 @@ pub trait RenderGroupBuilder<B: Backend, T: ?Sized>: std::fmt::Debug {
     /// Get nodes this group depends on.
     fn dependencies(&self) -> Vec<NodeId>;
 
+    /// Build render group instance.
     fn build<'a>(
         self: Box<Self>,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         queue: QueueId,
-        aux: &mut T,
+        aux: &T,
         framebuffer_width: u32,
         framebuffer_height: u32,
         subpass: gfx_hal::pass::Subpass<'_, B>,
-        buffers: Vec<NodeBuffer<'a, B>>,
-        images: Vec<NodeImage<'a, B>>,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
     ) -> Result<Box<dyn RenderGroup<B, T>>, failure::Error>;
 }
 
@@ -145,21 +163,23 @@ where
     }
 
     fn dependencies(&self) -> Vec<NodeId> {
-        self.dependencies.iter().cloned().collect()
+        self.dependencies.clone()
     }
 
     fn build<'a>(
         self: Box<Self>,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         queue: QueueId,
-        aux: &mut T,
+        aux: &T,
         framebuffer_width: u32,
         framebuffer_height: u32,
         subpass: gfx_hal::pass::Subpass<'_, B>,
-        buffers: Vec<NodeBuffer<'a, B>>,
-        images: Vec<NodeImage<'a, B>>,
+        buffers: Vec<NodeBuffer>,
+        images: Vec<NodeImage>,
     ) -> Result<Box<dyn RenderGroup<B, T>>, failure::Error> {
         self.desc.build(
+            ctx,
             factory,
             queue,
             aux,
