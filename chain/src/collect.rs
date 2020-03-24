@@ -1,4 +1,6 @@
 use std::cmp::max;
+use std::collections::hash_map::RandomState;
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Range;
 
@@ -35,7 +37,7 @@ struct Fitness {
 
 struct ResolvedNode {
     id: usize,
-    family: gfx_hal::queue::QueueFamilyId,
+    family: rendy_core::hal::queue::QueueFamilyId,
     queues: Range<usize>,
     rev_deps: Vec<usize>,
     buffers: Vec<(usize, State<Buffer>)>,
@@ -46,7 +48,7 @@ impl Default for ResolvedNode {
     fn default() -> Self {
         ResolvedNode {
             id: 0,
-            family: gfx_hal::queue::QueueFamilyId(0),
+            family: rendy_core::hal::queue::QueueFamilyId(0),
             queues: 0..0,
             rev_deps: Vec::new(),
             buffers: Vec::new(),
@@ -66,7 +68,7 @@ struct ChainData<R: Resource> {
     chain: Chain<R>,
     last_link_wait_factor: usize,
     current_link_wait_factor: usize,
-    current_family: Option<gfx_hal::queue::QueueFamilyId>,
+    current_family: Option<rendy_core::hal::queue::QueueFamilyId>,
 }
 impl<R: Resource> Default for ChainData<R> {
     fn default() -> Self {
@@ -88,7 +90,7 @@ struct QueueData {
 /// This function tries to find the most appropriate schedule for nodes execution.
 pub fn collect<Q>(nodes: Vec<Node>, max_queues: Q) -> Chains
 where
-    Q: Fn(gfx_hal::queue::QueueFamilyId) -> usize,
+    Q: Fn(rendy_core::hal::queue::QueueFamilyId) -> usize,
 {
     // Resolve nodes into a form faster to work with.
     let (nodes, mut unscheduled_nodes) = resolve_nodes(nodes, max_queues);
@@ -179,13 +181,13 @@ fn fill<T: Default>(num: usize) -> Vec<T> {
 }
 
 struct LookupBuilder<I: Hash + Eq + Copy> {
-    forward: fnv::FnvHashMap<I, usize>,
+    forward: HashMap<I, usize>,
     backward: Vec<I>,
 }
 impl<I: Hash + Eq + Copy> LookupBuilder<I> {
     fn new() -> LookupBuilder<I> {
         LookupBuilder {
-            forward: fnv::FnvHashMap::default(),
+            forward: HashMap::default(),
             backward: Vec::new(),
         }
     }
@@ -204,7 +206,7 @@ impl<I: Hash + Eq + Copy> LookupBuilder<I> {
 
 fn resolve_nodes<Q>(nodes: Vec<Node>, max_queues: Q) -> (ResolvedNodeSet, Vec<usize>)
 where
-    Q: Fn(gfx_hal::queue::QueueFamilyId) -> usize,
+    Q: Fn(rendy_core::hal::queue::QueueFamilyId) -> usize,
 {
     let node_count = nodes.len();
 
@@ -215,7 +217,9 @@ where
     let mut buffers = LookupBuilder::new();
     let mut images = LookupBuilder::new();
 
-    let mut family_full = fnv::FnvHashMap::default();
+    let s = RandomState::new();
+    let mut family_full = HashMap::with_hasher(s);
+
     for node in nodes {
         let family = node.family;
         if !family_full.contains_key(&family) {
@@ -268,8 +272,8 @@ where
     )
 }
 
-fn reify_chain<R: Resource>(ids: &[Id], vec: Vec<ChainData<R>>) -> fnv::FnvHashMap<Id, Chain<R>> {
-    let mut map = fnv::FnvHashMap::with_capacity_and_hasher(vec.len(), Default::default());
+fn reify_chain<R: Resource>(ids: &[Id], vec: Vec<ChainData<R>>) -> HashMap<Id, Chain<R>> {
+    let mut map = HashMap::with_capacity_and_hasher(vec.len(), Default::default());
     for (chain, &i) in vec.into_iter().zip(ids) {
         map.insert(i, chain.chain);
     }
@@ -383,7 +387,7 @@ fn schedule_node<'a>(
 
 fn add_to_chain<R, S>(
     id: Id,
-    family: gfx_hal::queue::QueueFamilyId,
+    family: rendy_core::hal::queue::QueueFamilyId,
     chain_data: &mut ChainData<R>,
     sid: SubmissionId,
     submission: &mut Submission<S>,

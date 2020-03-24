@@ -22,22 +22,36 @@ mod reflect;
 pub use self::shaderc::*;
 
 #[cfg(feature = "spirv-reflection")]
-pub use self::reflect::SpirvReflection;
+pub use self::reflect::{ReflectError, ReflectTypeError, RetrievalKind, SpirvReflection};
 
-use gfx_hal::{pso::ShaderStageFlags, Backend};
+use rendy_core::hal::{pso::ShaderStageFlags, Backend};
 use std::collections::HashMap;
+
+/// Error type returned by this module.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ShaderError {}
+
+impl std::error::Error for ShaderError {}
+impl std::fmt::Display for ShaderError {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {}
+    }
+}
 
 /// Interface to create shader modules from shaders.
 /// Implemented for static shaders via [`compile_to_spirv!`] macro.
 ///
 pub trait Shader {
+    /// The error type returned by the spirv function of this shader.
+    type Error: std::fmt::Debug;
+
     /// Get spirv bytecode.
-    fn spirv(&self) -> Result<std::borrow::Cow<'_, [u8]>, failure::Error>;
+    fn spirv(&self) -> Result<std::borrow::Cow<'_, [u32]>, <Self as Shader>::Error>;
 
     /// Get the entry point of the shader.
     fn entry(&self) -> &str;
 
-    /// Get the gfx_hal representation of this shaders kind/stage.
+    /// Get the rendy_core::hal representation of this shaders kind/stage.
     fn stage(&self) -> ShaderStageFlags;
 
     /// Create shader module.
@@ -47,12 +61,16 @@ pub trait Shader {
     unsafe fn module<B>(
         &self,
         factory: &rendy_factory::Factory<B>,
-    ) -> Result<B::ShaderModule, failure::Error>
+    ) -> Result<B::ShaderModule, rendy_core::hal::device::ShaderError>
     where
         B: Backend,
     {
-        gfx_hal::Device::create_shader_module(factory.device().raw(), &self.spirv()?)
-            .map_err(Into::into)
+        rendy_core::hal::device::Device::create_shader_module(
+            factory.device().raw(),
+            &self.spirv().map_err(|e| {
+                rendy_core::hal::device::ShaderError::CompilationFailed(format!("{:?}", e))
+            })?,
+        )
     }
 }
 
@@ -60,27 +78,62 @@ pub trait Shader {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SpirvShader {
-    #[cfg_attr(feature = "serde", serde(with = "serde_bytes"))]
-    spirv: Vec<u8>,
+    #[cfg_attr(feature = "serde", serde(with = "serde_spirv"))]
+    spirv: Vec<u32>,
     stage: ShaderStageFlags,
     entry: String,
 }
 
+#[cfg(feature = "serde")]
+mod serde_spirv {
+    pub fn serialize<S>(data: &Vec<u32>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(rendy_core::cast_slice(&data))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Via the serde::Deserialize impl for &[u8].
+        let bytes: &[u8] = serde::Deserialize::deserialize(deserializer)?;
+        rendy_core::hal::pso::read_spirv(std::io::Cursor::new(bytes))
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 impl SpirvShader {
     /// Create Spir-V shader from bytes.
-    pub fn new(spirv: Vec<u8>, stage: ShaderStageFlags, entrypoint: &str) -> Self {
+    pub fn new(spirv: Vec<u32>, stage: ShaderStageFlags, entrypoint: &str) -> Self {
         assert!(!spirv.is_empty());
-        assert_eq!(spirv.len() % 4, 0);
         Self {
             spirv,
             stage,
             entry: entrypoint.to_string(),
         }
     }
+
+    /// Create Spir-V shader from bytecode stored as bytes.
+    /// Errors when passed byte array length is not a multiple of 4.
+    pub fn from_bytes(
+        spirv: &[u8],
+        stage: ShaderStageFlags,
+        entrypoint: &str,
+    ) -> std::io::Result<Self> {
+        Ok(Self::new(
+            rendy_core::hal::pso::read_spirv(std::io::Cursor::new(spirv))?,
+            stage,
+            entrypoint,
+        ))
+    }
 }
 
 impl Shader for SpirvShader {
-    fn spirv(&self) -> Result<std::borrow::Cow<'_, [u8]>, failure::Error> {
+    type Error = ShaderError;
+
+    fn spirv(&self) -> Result<std::borrow::Cow<'_, [u32]>, ShaderError> {
         Ok(std::borrow::Cow::Borrowed(&self.spirv))
     }
 
@@ -94,10 +147,20 @@ impl Shader for SpirvShader {
 }
 
 /// A `ShaderSet` object represents a merged collection of `ShaderStorage` structures, which reflects merged information for all shaders in the set.
-#[derive(derivative::Derivative, Debug)]
-#[derivative(Default(bound = ""))]
+#[derive(Debug)]
 pub struct ShaderSet<B: Backend> {
     shaders: HashMap<ShaderStageFlags, ShaderStorage<B>>,
+}
+
+impl<B> Default for ShaderSet<B>
+where
+    B: Backend,
+{
+    fn default() -> Self {
+        ShaderSet {
+            shaders: HashMap::default(),
+        }
+    }
 }
 
 impl<B: Backend> ShaderSet<B> {
@@ -105,7 +168,7 @@ impl<B: Backend> ShaderSet<B> {
     pub fn load(
         &mut self,
         factory: &rendy_factory::Factory<B>,
-    ) -> Result<&mut Self, failure::Error> {
+    ) -> Result<&mut Self, rendy_core::hal::device::ShaderError> {
         for (_, v) in self.shaders.iter_mut() {
             unsafe { v.compile(factory)? }
         }
@@ -113,13 +176,15 @@ impl<B: Backend> ShaderSet<B> {
         Ok(self)
     }
 
-    /// Returns the `GraphicsShaderSet` structure to provide all the runtime information needed to use the shaders in this set in gfx_hal.
-    pub fn raw<'a>(&'a self) -> Result<(gfx_hal::pso::GraphicsShaderSet<'a, B>), failure::Error> {
-        Ok(gfx_hal::pso::GraphicsShaderSet {
+    /// Returns the `GraphicsShaderSet` structure to provide all the runtime information needed to use the shaders in this set in rendy_core::hal.
+    pub fn raw<'a>(
+        &'a self,
+    ) -> Result<rendy_core::hal::pso::GraphicsShaderSet<'a, B>, ShaderError> {
+        Ok(rendy_core::hal::pso::GraphicsShaderSet {
             vertex: self
                 .shaders
                 .get(&ShaderStageFlags::VERTEX)
-                .unwrap()
+                .expect("ShaderSet doesn't contain vertex shader")
                 .get_entry_point()?
                 .unwrap(),
             fragment: match self.shaders.get(&ShaderStageFlags::FRAGMENT) {
@@ -154,17 +219,17 @@ impl<B: Backend> ShaderSet<B> {
 #[allow(missing_copy_implementations)]
 pub struct SpecConstantSet {
     /// Vertex specialization
-    pub vertex: Option<gfx_hal::pso::Specialization<'static>>,
+    pub vertex: Option<rendy_core::hal::pso::Specialization<'static>>,
     /// Fragment specialization
-    pub fragment: Option<gfx_hal::pso::Specialization<'static>>,
+    pub fragment: Option<rendy_core::hal::pso::Specialization<'static>>,
     /// Geometry specialization
-    pub geometry: Option<gfx_hal::pso::Specialization<'static>>,
+    pub geometry: Option<rendy_core::hal::pso::Specialization<'static>>,
     /// Hull specialization
-    pub hull: Option<gfx_hal::pso::Specialization<'static>>,
+    pub hull: Option<rendy_core::hal::pso::Specialization<'static>>,
     /// Domain specialization
-    pub domain: Option<gfx_hal::pso::Specialization<'static>>,
+    pub domain: Option<rendy_core::hal::pso::Specialization<'static>>,
     /// Compute specialization
-    pub compute: Option<gfx_hal::pso::Specialization<'static>>,
+    pub compute: Option<rendy_core::hal::pso::Specialization<'static>>,
 }
 
 /// Builder class which is used to begin the reflection and shader set construction process for a shader set. Provides all the functionality needed to
@@ -172,12 +237,12 @@ pub struct SpecConstantSet {
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ShaderSetBuilder {
-    vertex: Option<(Vec<u8>, String)>,
-    fragment: Option<(Vec<u8>, String)>,
-    geometry: Option<(Vec<u8>, String)>,
-    hull: Option<(Vec<u8>, String)>,
-    domain: Option<(Vec<u8>, String)>,
-    compute: Option<(Vec<u8>, String)>,
+    vertex: Option<(Vec<u32>, String)>,
+    fragment: Option<(Vec<u32>, String)>,
+    geometry: Option<(Vec<u32>, String)>,
+    hull: Option<(Vec<u32>, String)>,
+    domain: Option<(Vec<u32>, String)>,
+    compute: Option<(Vec<u32>, String)>,
 }
 
 impl ShaderSetBuilder {
@@ -192,69 +257,100 @@ impl ShaderSetBuilder {
         &self,
         factory: &rendy_factory::Factory<B>,
         spec_constants: SpecConstantSet,
-    ) -> Result<ShaderSet<B>, failure::Error> {
+    ) -> Result<ShaderSet<B>, rendy_core::hal::device::ShaderError> {
         let mut set = ShaderSet::<B>::default();
 
         if self.vertex.is_none() && self.compute.is_none() {
-            failure::bail!("A vertex or compute shader must be provided");
+            let msg = "A vertex or compute shader must be provided".to_string();
+            return Err(rendy_core::hal::device::ShaderError::InterfaceMismatch(msg));
         }
+        type ShaderTy = (
+            Vec<u32>,
+            String,
+            Option<rendy_core::hal::pso::Specialization<'static>>,
+        );
 
-        let create_storage = move |stage,
-                                   shader: (Vec<u8>, String, Option<gfx_hal::pso::Specialization<'static>>),
-                                   factory|
-              -> Result<ShaderStorage<B>, failure::Error> {
-            let mut storage = ShaderStorage {
-                stage: stage,
-                spirv: shader.0,
-                module: None,
-                entrypoint: shader.1.clone(),
-                specialization: shader.2,
+        let create_storage =
+            move |stage,
+                  shader: ShaderTy,
+                  factory|
+                  -> Result<ShaderStorage<B>, rendy_core::hal::device::ShaderError> {
+                let mut storage = ShaderStorage {
+                    stage: stage,
+                    spirv: shader.0,
+                    module: None,
+                    entrypoint: shader.1.clone(),
+                    specialization: shader.2,
+                };
+                unsafe {
+                    storage.compile(factory)?;
+                }
+                Ok(storage)
             };
-            unsafe {
-                storage.compile(factory)?;
-            }
-            Ok(storage)
-        };
 
         if let Some(shader) = self.vertex.clone() {
             set.shaders.insert(
                 ShaderStageFlags::VERTEX,
-                create_storage(ShaderStageFlags::VERTEX, (shader.0, shader.1, spec_constants.vertex), factory)?,
+                create_storage(
+                    ShaderStageFlags::VERTEX,
+                    (shader.0, shader.1, spec_constants.vertex),
+                    factory,
+                )?,
             );
         }
 
         if let Some(shader) = self.fragment.clone() {
             set.shaders.insert(
                 ShaderStageFlags::FRAGMENT,
-                create_storage(ShaderStageFlags::FRAGMENT, (shader.0, shader.1, spec_constants.fragment), factory)?,
+                create_storage(
+                    ShaderStageFlags::FRAGMENT,
+                    (shader.0, shader.1, spec_constants.fragment),
+                    factory,
+                )?,
             );
         }
 
         if let Some(shader) = self.compute.clone() {
             set.shaders.insert(
                 ShaderStageFlags::COMPUTE,
-                create_storage(ShaderStageFlags::COMPUTE, (shader.0, shader.1, spec_constants.compute), factory)?,
+                create_storage(
+                    ShaderStageFlags::COMPUTE,
+                    (shader.0, shader.1, spec_constants.compute),
+                    factory,
+                )?,
             );
         }
 
         if let Some(shader) = self.domain.clone() {
             set.shaders.insert(
                 ShaderStageFlags::DOMAIN,
-                create_storage(ShaderStageFlags::DOMAIN, (shader.0, shader.1, spec_constants.domain), factory)?,
+                create_storage(
+                    ShaderStageFlags::DOMAIN,
+                    (shader.0, shader.1, spec_constants.domain),
+                    factory,
+                )?,
             );
         }
 
         if let Some(shader) = self.hull.clone() {
             set.shaders.insert(
                 ShaderStageFlags::HULL,
-                create_storage(ShaderStageFlags::HULL, (shader.0, shader.1, spec_constants.hull), factory)?,
+                create_storage(
+                    ShaderStageFlags::HULL,
+                    (shader.0, shader.1, spec_constants.hull),
+                    factory,
+                )?,
             );
         }
 
         if let Some(shader) = self.geometry.clone() {
             set.shaders.insert(
                 ShaderStageFlags::GEOMETRY,
-                create_storage(ShaderStageFlags::GEOMETRY, (shader.0, shader.1, spec_constants.geometry), factory)?,
+                create_storage(
+                    ShaderStageFlags::GEOMETRY,
+                    (shader.0, shader.1, spec_constants.geometry),
+                    factory,
+                )?,
             );
         }
 
@@ -263,7 +359,7 @@ impl ShaderSetBuilder {
 
     /// Add a vertex shader to this shader set
     #[inline(always)]
-    pub fn with_vertex<S: Shader>(mut self, shader: &S) -> Result<Self, failure::Error> {
+    pub fn with_vertex<S: Shader>(mut self, shader: &S) -> Result<Self, S::Error> {
         let data = shader.spirv()?;
         self.vertex = Some((data.to_vec(), shader.entry().to_string()));
         Ok(self)
@@ -271,7 +367,7 @@ impl ShaderSetBuilder {
 
     /// Add a fragment shader to this shader set
     #[inline(always)]
-    pub fn with_fragment<S: Shader>(mut self, shader: &S) -> Result<Self, failure::Error> {
+    pub fn with_fragment<S: Shader>(mut self, shader: &S) -> Result<Self, S::Error> {
         let data = shader.spirv()?;
         self.fragment = Some((data.to_vec(), shader.entry().to_string()));
         Ok(self)
@@ -279,7 +375,7 @@ impl ShaderSetBuilder {
 
     /// Add a geometry shader to this shader set
     #[inline(always)]
-    pub fn with_geometry<S: Shader>(mut self, shader: &S) -> Result<Self, failure::Error> {
+    pub fn with_geometry<S: Shader>(mut self, shader: &S) -> Result<Self, S::Error> {
         let data = shader.spirv()?;
         self.geometry = Some((data.to_vec(), shader.entry().to_string()));
         Ok(self)
@@ -287,7 +383,7 @@ impl ShaderSetBuilder {
 
     /// Add a hull shader to this shader set
     #[inline(always)]
-    pub fn with_hull<S: Shader>(mut self, shader: &S) -> Result<Self, failure::Error> {
+    pub fn with_hull<S: Shader>(mut self, shader: &S) -> Result<Self, S::Error> {
         let data = shader.spirv()?;
         self.hull = Some((data.to_vec(), shader.entry().to_string()));
         Ok(self)
@@ -295,7 +391,7 @@ impl ShaderSetBuilder {
 
     /// Add a domain shader to this shader set
     #[inline(always)]
-    pub fn with_domain<S: Shader>(mut self, shader: &S) -> Result<Self, failure::Error> {
+    pub fn with_domain<S: Shader>(mut self, shader: &S) -> Result<Self, S::Error> {
         let data = shader.spirv()?;
         self.domain = Some((data.to_vec(), shader.entry().to_string()));
         Ok(self)
@@ -304,7 +400,7 @@ impl ShaderSetBuilder {
     /// Add a compute shader to this shader set.
     /// Note a compute or vertex shader must always exist in a shader set.
     #[inline(always)]
-    pub fn with_compute<S: Shader>(mut self, shader: &S) -> Result<Self, failure::Error> {
+    pub fn with_compute<S: Shader>(mut self, shader: &S) -> Result<Self, S::Error> {
         let data = shader.spirv()?;
         self.compute = Some((data.to_vec(), shader.entry().to_string()));
         Ok(self)
@@ -313,9 +409,9 @@ impl ShaderSetBuilder {
     #[cfg(feature = "spirv-reflection")]
     /// This function processes all shaders provided to the builder and computes and stores full reflection information on the shader.
     /// This includes names, attributes, descriptor sets and push constants used by the shaders, as well as compiling local caches for performance.
-    pub fn reflect(&self) -> Result<SpirvReflection, failure::Error> {
+    pub fn reflect(&self) -> Result<SpirvReflection, ReflectError> {
         if self.vertex.is_none() && self.compute.is_none() {
-            failure::bail!("A vertex or compute shader must be provided");
+            return Err(ReflectError::NoVertComputeProvided);
         }
 
         // We need to combine and merge all the reflections into a single SpirvReflection instance
@@ -347,20 +443,23 @@ impl ShaderSetBuilder {
 #[derive(Debug)]
 pub struct ShaderStorage<B: Backend> {
     stage: ShaderStageFlags,
-    spirv: Vec<u8>,
+    spirv: Vec<u32>,
     module: Option<B::ShaderModule>,
     entrypoint: String,
-    specialization: Option<gfx_hal::pso::Specialization<'static>>,
+    specialization: Option<rendy_core::hal::pso::Specialization<'static>>,
 }
 impl<B: Backend> ShaderStorage<B> {
-    /// Builds the `EntryPoint` structure used by gfx_hal to determine how to utilize this shader
+    /// Builds the `EntryPoint` structure used by rendy_core::hal to determine how to utilize this shader
     pub fn get_entry_point<'a>(
         &'a self,
-    ) -> Result<Option<gfx_hal::pso::EntryPoint<'a, B>>, failure::Error> {
-        Ok(Some(gfx_hal::pso::EntryPoint {
+    ) -> Result<Option<rendy_core::hal::pso::EntryPoint<'a, B>>, ShaderError> {
+        Ok(Some(rendy_core::hal::pso::EntryPoint {
             entry: &self.entrypoint,
             module: self.module.as_ref().unwrap(),
-            specialization: self.specialization.clone().unwrap_or(gfx_hal::pso::Specialization::default()),
+            specialization: self
+                .specialization
+                .clone()
+                .unwrap_or(rendy_core::hal::pso::Specialization::default()),
         }))
     }
 
@@ -368,8 +467,8 @@ impl<B: Backend> ShaderStorage<B> {
     pub unsafe fn compile(
         &mut self,
         factory: &rendy_factory::Factory<B>,
-    ) -> Result<(), failure::Error> {
-        self.module = Some(gfx_hal::Device::create_shader_module(
+    ) -> Result<(), rendy_core::hal::device::ShaderError> {
+        self.module = Some(rendy_core::hal::device::Device::create_shader_module(
             factory.device().raw(),
             &self.spirv,
         )?);
@@ -378,7 +477,7 @@ impl<B: Backend> ShaderStorage<B> {
     }
 
     fn dispose(&mut self, factory: &rendy_factory::Factory<B>) {
-        use gfx_hal::device::Device;
+        use rendy_core::hal::device::Device;
 
         if let Some(module) = self.module.take() {
             unsafe { factory.destroy_shader_module(module) };
@@ -386,6 +485,7 @@ impl<B: Backend> ShaderStorage<B> {
         self.module = None;
     }
 }
+
 impl<B: Backend> Drop for ShaderStorage<B> {
     fn drop(&mut self) {
         if self.module.is_some() {

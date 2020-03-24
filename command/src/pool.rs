@@ -1,17 +1,15 @@
 //! CommandPool module docs.
 
 use {
-    crate::{buffer::*, capability::*, family::FamilyId, util::Device},
-    gfx_hal::{Backend, Device as _},
+    crate::{buffer::*, capability::*, core::Device, family::FamilyId},
+    rendy_core::hal::{device::Device as _, pool::CommandPool as _, Backend},
 };
 
 /// Simple pool wrapper.
 /// Doesn't provide any guarantees.
 /// Wraps raw buffers into `CommandCommand buffer`.
-#[derive(derivative::Derivative)]
-#[derivative(Debug)]
+#[derive(Debug)]
 pub struct CommandPool<B: Backend, C = QueueType, R = NoIndividualReset> {
-    #[derivative(Debug = "ignore")]
     raw: B::CommandPool,
     capability: C,
     reset: R,
@@ -37,14 +35,16 @@ where
         family: FamilyId,
         capability: C,
         device: &Device<B>,
-    ) -> Result<Self, gfx_hal::device::OutOfMemory>
+    ) -> Result<Self, rendy_core::hal::device::OutOfMemory>
     where
         R: Reset,
         C: Capability,
     {
         let reset = R::default();
-        let raw = device
-            .create_command_pool(gfx_hal::queue::QueueFamilyId(family.index), reset.flags())?;
+        let raw = device.create_command_pool(
+            rendy_core::hal::queue::QueueFamilyId(family.index),
+            reset.flags(),
+        )?;
         Ok(CommandPool::from_raw(raw, capability, reset, family))
     }
 
@@ -77,8 +77,7 @@ where
     {
         let level = L::default();
 
-        let buffers =
-            gfx_hal::pool::RawCommandPool::allocate_vec(&mut self.raw, count, level.raw_level());
+        let buffers = unsafe { self.raw.allocate_vec(count, level.raw_level()) };
 
         buffers
             .into_iter()
@@ -107,7 +106,7 @@ where
             .map(|buffer| buffer.into_raw())
             .collect::<Vec<_>>();
 
-        gfx_hal::pool::RawCommandPool::free(&mut self.raw, buffers);
+        self.raw.free(buffers);
     }
 
     /// Reset all buffers of this pool.
@@ -117,7 +116,7 @@ where
     /// All buffers allocated from this pool must be marked reset.
     /// See [`CommandBuffer::mark_reset`](struct.Command buffer.html#method.mark_reset)
     pub unsafe fn reset(&mut self) {
-        gfx_hal::pool::RawCommandPool::reset(&mut self.raw);
+        rendy_core::hal::pool::CommandPool::reset(&mut self.raw, false);
     }
 
     /// Dispose of command pool.

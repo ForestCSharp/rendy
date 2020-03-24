@@ -4,8 +4,8 @@
 //! call.
 
 use {
-    gfx_hal::Backend,
-    std::{any::Any, marker::PhantomData, ops::Deref},
+    crate::hal::Backend,
+    std::ops::{Deref, DerefMut},
 };
 
 #[cfg(not(feature = "no-slow-safety-checks"))]
@@ -69,9 +69,8 @@ impl InstanceId {
 
 /// Raw instance wrapper with id.
 pub struct Instance<B: Backend> {
-    instance: Box<dyn Any + Send + Sync>,
+    instance: B::Instance,
     id: InstanceId,
-    marker: PhantomData<B>,
 }
 
 impl<B> Instance<B>
@@ -79,64 +78,56 @@ where
     B: Backend,
 {
     /// Wrap instance value.
-    pub fn new(instance: impl gfx_hal::Instance) -> Self {
+    pub fn new(instance: B::Instance) -> Self {
         Instance {
             id: new_instance_id(),
-            instance: Box::new(instance),
-            marker: PhantomData,
+            instance,
         }
     }
-}
 
-impl<B> Instance<B>
-where
-    B: Backend,
-{
+    /// Wrap instance value.
+    pub unsafe fn from_raw(instance: B::Instance, id: InstanceId) -> Self {
+        Instance { id, instance }
+    }
+
     /// Get instance id.
     pub fn id(&self) -> InstanceId {
         self.id
     }
 
     /// Get reference to raw instance.
-    pub fn raw(&self) -> &dyn Any {
-        &*self.instance
+    pub fn raw(&self) -> &B::Instance {
+        &self.instance
     }
 
     /// Get mutable reference to raw instance.
-    pub fn raw_mut(&mut self) -> &mut dyn Any {
-        &mut *self.instance
+    pub fn raw_mut(&mut self) -> &mut B::Instance {
+        &mut self.instance
     }
 
-    /// Get reference to typed raw instance.
-    pub fn raw_typed<T>(&self) -> Option<&T>
-    where
-        T: gfx_hal::Instance,
-    {
-        if std::any::TypeId::of::<T::Backend>() == std::any::TypeId::of::<B>() {
-            Some(
-                self.instance
-                    .downcast_ref::<T>()
-                    .expect("Bad instance wrapper"),
-            )
-        } else {
-            None
-        }
+    /// Get inner raw instance
+    pub fn into_raw(self) -> B::Instance {
+        self.instance
     }
+}
 
-    /// Get mutable reference to typed raw instance.
-    pub fn raw_typed_mut<T>(&mut self) -> Option<&mut T>
-    where
-        T: gfx_hal::Instance,
-    {
-        if std::any::TypeId::of::<T::Backend>() == std::any::TypeId::of::<B>() {
-            Some(
-                self.instance
-                    .downcast_mut::<T>()
-                    .expect("Bad instance wrapper"),
-            )
-        } else {
-            None
-        }
+impl<B> Deref for Instance<B>
+where
+    B: Backend,
+{
+    type Target = B::Instance;
+
+    fn deref(&self) -> &B::Instance {
+        self.raw()
+    }
+}
+
+impl<B> DerefMut for Instance<B>
+where
+    B: Backend,
+{
+    fn deref_mut(&mut self) -> &mut B::Instance {
+        self.raw_mut()
     }
 }
 
@@ -205,6 +196,11 @@ where
     pub fn raw_mut(&mut self) -> &mut B::Device {
         &mut self.device
     }
+
+    /// Get inner raw device
+    pub fn into_raw(self) -> B::Device {
+        self.device
+    }
 }
 
 impl<B> Deref for Device<B>
@@ -225,7 +221,7 @@ macro_rules! device_owned {
         #[allow(unused_qualifications)]
         impl<B $(, $arg)*> $type<B $(, $arg)*>
         where
-            B: gfx_hal::Backend,
+            B: $crate::hal::Backend,
             $(
                 $($arg: $(?$sized)* $($bound)?,)?
             )*
@@ -264,7 +260,7 @@ macro_rules! instance_owned {
         #[allow(unused_qualifications)]
         impl<B $(, $arg)*> $type<B $(, $arg)*>
         where
-            B: gfx_hal::Backend,
+            B: $crate::hal::Backend,
             $(
                 $($arg: $(?$sized)? $($bound)?,)?
             )*

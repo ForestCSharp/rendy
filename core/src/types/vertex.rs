@@ -1,8 +1,8 @@
 //! Built-in vertex formats.
 
-use derivative::Derivative;
-use gfx_hal::format::Format;
+use crate::hal::format::Format;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::{borrow::Cow, fmt::Debug};
 
 /// Trait for vertex attributes to implement
@@ -18,7 +18,7 @@ pub trait AsAttribute: Debug + PartialEq + PartialOrd + Copy + Send + Sync + 'st
 pub struct AttrUuid(u16);
 
 lazy_static::lazy_static! {
-    static ref UUID_MAP: parking_lot::RwLock<fnv::FnvHashMap<(Cow<'static, str>, u8, Format), AttrUuid>> =
+    static ref UUID_MAP: parking_lot::RwLock<HashMap<(Cow<'static, str>, u8, Format), AttrUuid>> =
         Default::default();
 }
 
@@ -179,11 +179,11 @@ impl VertexFormat {
     /// Convert into gfx digestible type.
     pub fn gfx_vertex_input_desc(
         &self,
-        rate: gfx_hal::pso::VertexInputRate,
+        rate: crate::hal::pso::VertexInputRate,
     ) -> (
-        Vec<gfx_hal::pso::Element<Format>>,
-        gfx_hal::pso::ElemStride,
-        gfx_hal::pso::VertexInputRate,
+        Vec<crate::hal::pso::Element<Format>>,
+        crate::hal::pso::ElemStride,
+        crate::hal::pso::VertexInputRate,
     ) {
         (
             self.attributes
@@ -286,24 +286,37 @@ impl<N: Into<Cow<'static, str>>> AsAttributes for (Format, N) {
 }
 
 /// raw hal type for vertex attribute
-type AttributeElem = gfx_hal::pso::Element<Format>;
+type AttributeElem = crate::hal::pso::Element<Format>;
 
 /// Vertex attribute type.
-#[derive(Clone, Debug, Derivative)]
-#[derivative(PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct Attribute {
     /// globally unique identifier for attribute's semantic
     uuid: AttrUuid,
     /// hal type with offset and format
     element: AttributeElem,
     /// Attribute array index. Matrix attributes are treated like array of vectors.
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(Hash = "ignore")]
     index: u8,
     /// Attribute name as used in the shader
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(Hash = "ignore")]
     name: Cow<'static, str>,
+}
+
+impl PartialEq for Attribute {
+    fn eq(&self, other: &Self) -> bool {
+        self.uuid == other.uuid && self.element == other.element
+    }
+}
+
+impl Eq for Attribute {}
+
+impl std::hash::Hash for Attribute {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: std::hash::Hasher,
+    {
+        self.uuid.hash(state);
+        self.element.hash(state);
+    }
 }
 
 impl Attribute {

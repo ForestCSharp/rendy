@@ -6,14 +6,14 @@ pub mod render;
 
 use {
     crate::{
-        command::{Capability, Family, FamilyId, Fence, Queue, Submission, Submittable, Supports},
-        factory::Factory,
+        command::{Capability, Families, Family, FamilyId, Fence, Queue, Submission, Submittable},
+        factory::{Factory, UploadError},
         frame::Frames,
         graph::GraphContext,
-        util::{rendy_with_metal_backend, rendy_without_metal_backend},
+        wsi::SwapchainError,
         BufferId, ImageId, NodeId,
     },
-    gfx_hal::{queue::QueueFamilyId, Backend},
+    rendy_core::hal::{queue::QueueFamilyId, Backend},
 };
 
 /// Buffer access node will perform.
@@ -22,24 +22,24 @@ use {
 #[derive(Clone, Copy, Debug)]
 pub struct BufferAccess {
     /// Access flags.
-    pub access: gfx_hal::buffer::Access,
+    pub access: rendy_core::hal::buffer::Access,
 
     /// Intended usage flags for buffer.
     /// TODO: Could derive from access?
-    pub usage: gfx_hal::buffer::Usage,
+    pub usage: rendy_core::hal::buffer::Usage,
 
     /// Pipeline stages at which buffer is accessd.
-    pub stages: gfx_hal::pso::PipelineStage,
+    pub stages: rendy_core::hal::pso::PipelineStage,
 }
 
 /// Buffer pipeline barrier.
 #[derive(Clone, Debug)]
 pub struct BufferBarrier {
     /// State transition for the buffer.
-    pub states: std::ops::Range<gfx_hal::buffer::State>,
+    pub states: std::ops::Range<rendy_core::hal::buffer::State>,
 
     /// Stages at which buffer is accessd.
-    pub stages: std::ops::Range<gfx_hal::pso::PipelineStage>,
+    pub stages: std::ops::Range<rendy_core::hal::pso::PipelineStage>,
 
     /// Transfer between families.
     pub families: Option<std::ops::Range<QueueFamilyId>>,
@@ -72,20 +72,20 @@ pub struct NodeBuffer {
 #[derive(Clone, Copy, Debug)]
 pub struct ImageAccess {
     /// Access flags.
-    pub access: gfx_hal::image::Access,
+    pub access: rendy_core::hal::image::Access,
 
     /// Intended usage flags for image.
     /// TODO: Could derive from access?
-    pub usage: gfx_hal::image::Usage,
+    pub usage: rendy_core::hal::image::Usage,
 
     /// Preferred layout for access.
     /// Actual layout will be reported int `NodeImage`.
     /// Actual layout is guaranteed to support same operations.
     /// TODO: Could derive from access?
-    pub layout: gfx_hal::image::Layout,
+    pub layout: rendy_core::hal::image::Layout,
 
     /// Pipeline stages at which image is accessd.
-    pub stages: gfx_hal::pso::PipelineStage,
+    pub stages: rendy_core::hal::pso::PipelineStage,
 }
 
 /// Image pipeline barrier.
@@ -94,10 +94,10 @@ pub struct ImageAccess {
 #[derive(Clone, Debug)]
 pub struct ImageBarrier {
     /// State transition for the image.
-    pub states: std::ops::Range<gfx_hal::image::State>,
+    pub states: std::ops::Range<rendy_core::hal::image::State>,
 
     /// Stages at which image is accessd.
-    pub stages: std::ops::Range<gfx_hal::pso::PipelineStage>,
+    pub stages: std::ops::Range<rendy_core::hal::pso::PipelineStage>,
 
     /// Transfer between families.
     pub families: Option<std::ops::Range<QueueFamilyId>>,
@@ -110,13 +110,13 @@ pub struct NodeImage {
     pub id: ImageId,
 
     /// Region of the image that is the transient resource.
-    pub range: gfx_hal::image::SubresourceRange,
+    pub range: rendy_core::hal::image::SubresourceRange,
 
     /// Image state for node.
-    pub layout: gfx_hal::image::Layout,
+    pub layout: rendy_core::hal::image::Layout,
 
     /// Specify that node should clear image to this value.
-    pub clear: Option<gfx_hal::command::ClearValue>,
+    pub clear: Option<rendy_core::hal::command::ClearValue>,
 
     /// Acquire barrier.
     /// Node implementation must insert it before first command that uses the image.
@@ -154,26 +154,6 @@ pub trait Node<B: Backend, T: ?Sized>:
     /// Graph will execute this node on command queue that supports this capability level.
     type Capability: Capability;
 
-    /// Description type to instantiate the node.
-    type Desc: NodeDesc<B, T, Node = Self>;
-
-    /// Desc creation.
-    /// Convenient method if `Self::Desc` implements `Default`.
-    fn desc() -> Self::Desc
-    where
-        Self::Desc: Default,
-    {
-        Default::default()
-    }
-
-    /// Builder creation.
-    fn builder() -> DescBuilder<B, T, Self::Desc>
-    where
-        Self::Desc: Default,
-    {
-        Self::desc().builder()
-    }
-
     /// Record commands required by node.
     /// Returned submits are guaranteed to be submitted within specified frame.
     fn run<'a>(
@@ -201,13 +181,7 @@ pub trait NodeDesc<B: Backend, T: ?Sized>: std::fmt::Debug + Sized + 'static {
 
     /// Make node builder.
     fn builder(self) -> DescBuilder<B, T, Self> {
-        DescBuilder {
-            desc: self,
-            buffers: Vec::new(),
-            images: Vec::new(),
-            dependencies: Vec::new(),
-            marker: std::marker::PhantomData,
-        }
+        DescBuilder::new(self)
     }
 
     /// Get set or buffer resources the node uses.
@@ -239,7 +213,7 @@ pub trait NodeDesc<B: Backend, T: ?Sized>: std::fmt::Debug + Sized + 'static {
         aux: &T,
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
-    ) -> Result<Self::Node, failure::Error>;
+    ) -> Result<Self::Node, NodeBuildError>;
 }
 
 /// Trait-object safe `Node`.
@@ -253,7 +227,7 @@ pub trait DynNode<B: Backend, T: ?Sized>: std::fmt::Debug + Sync + Send {
         queue: &mut Queue<B>,
         aux: &T,
         frames: &Frames<B>,
-        waits: &[(&'a B::Semaphore, gfx_hal::pso::PipelineStage)],
+        waits: &[(&'a B::Semaphore, rendy_core::hal::pso::PipelineStage)],
         signals: &[&'a B::Semaphore],
         fence: Option<&mut Fence<B>>,
     );
@@ -279,7 +253,7 @@ where
         queue: &mut Queue<B>,
         aux: &T,
         frames: &Frames<B>,
-        waits: &[(&'a B::Semaphore, gfx_hal::pso::PipelineStage)],
+        waits: &[(&'a B::Semaphore, rendy_core::hal::pso::PipelineStage)],
         signals: &[&'a B::Semaphore],
         fence: Option<&mut Fence<B>>,
     ) {
@@ -300,10 +274,76 @@ where
     }
 }
 
+/// Error building a node of the graph.
+#[derive(Debug)]
+pub enum NodeBuildError {
+    /// Filed to uplaod the data.
+    Upload(UploadError),
+    /// Mismatched or unsupported queue family.
+    QueueFamily(FamilyId),
+    /// Failed to create an imate view.
+    View(rendy_core::hal::image::ViewError),
+    /// Failed to create a pipeline.
+    Pipeline(rendy_core::hal::pso::CreationError),
+    /// Failed to create a swap chain.
+    Swapchain(SwapchainError),
+    /// Ran out of memory when creating something.
+    OutOfMemory(rendy_core::hal::device::OutOfMemory),
+}
+
+impl std::fmt::Display for NodeBuildError {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeBuildError::Upload(err) => write!(
+                fmt,
+                "Failed to build node because of failure to upload data: {:?}",
+                err
+            ),
+            NodeBuildError::QueueFamily(family) => write!(
+                fmt,
+                "Failed to build node because of mismatched or unsupported queue family: {:?}",
+                family
+            ),
+            NodeBuildError::View(err) => write!(
+                fmt,
+                "Failed to build node because of failure to create an image view: {:?}",
+                err
+            ),
+            NodeBuildError::Pipeline(err) => write!(
+                fmt,
+                "Failed to build node because of failure to create a pipeline: {:?}",
+                err
+            ),
+            NodeBuildError::Swapchain(err) => write!(
+                fmt,
+                "Failed to build node because of failure to create swapchain: {:?}",
+                err
+            ),
+            NodeBuildError::OutOfMemory(err) => write!(
+                fmt,
+                "Failed to build node because device ran out of memory while attempting to build: {:?}",
+                err
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NodeBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            NodeBuildError::Upload(err) => Some(err),
+            NodeBuildError::QueueFamily(_) => None,
+            NodeBuildError::View(err) => Some(err),
+            NodeBuildError::Pipeline(err) => Some(err),
+            NodeBuildError::Swapchain(err) => Some(err),
+            NodeBuildError::OutOfMemory(err) => Some(err),
+        }
+    }
+}
 /// Dynamic node builder that emits `DynNode`.
 pub trait NodeBuilder<B: Backend, T: ?Sized>: std::fmt::Debug {
     /// Pick family for this node to be executed onto.
-    fn family(&self, factory: &mut Factory<B>, families: &[Family<B>]) -> Option<FamilyId>;
+    fn family(&self, factory: &mut Factory<B>, families: &Families<B>) -> Option<FamilyId>;
 
     /// Get buffer accessed by the node.
     fn buffers(&self) -> Vec<(BufferId, BufferAccess)>;
@@ -324,12 +364,10 @@ pub trait NodeBuilder<B: Backend, T: ?Sized>: std::fmt::Debug {
         aux: &T,
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
-    ) -> Result<Box<dyn DynNode<B, T>>, failure::Error>;
+    ) -> Result<Box<dyn DynNode<B, T>>, NodeBuildError>;
 }
 
 /// Builder for the node.
-#[derive(derivative::Derivative)]
-#[derivative(Debug(bound = "N: std::fmt::Debug"))]
 pub struct DescBuilder<B: Backend, T: ?Sized, N> {
     desc: N,
     buffers: Vec<BufferId>,
@@ -338,11 +376,37 @@ pub struct DescBuilder<B: Backend, T: ?Sized, N> {
     marker: std::marker::PhantomData<fn(B, &T)>,
 }
 
+impl<B, T, N> std::fmt::Debug for DescBuilder<B, T, N>
+where
+    B: Backend,
+    T: ?Sized,
+    N: std::fmt::Debug,
+{
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("DescBuilder")
+            .field("desc", &self.desc)
+            .field("buffers", &self.buffers)
+            .field("images", &self.images)
+            .field("dependencies", &self.dependencies)
+            .finish()
+    }
+}
+
 impl<B, T, N> DescBuilder<B, T, N>
 where
     B: Backend,
     T: ?Sized,
 {
+    /// Create new builder out of desc
+    pub fn new(desc: N) -> Self {
+        DescBuilder {
+            desc,
+            buffers: Vec::new(),
+            images: Vec::new(),
+            dependencies: Vec::new(),
+            marker: std::marker::PhantomData,
+        }
+    }
     /// Add buffer to the node.
     /// This method must be called for each buffer node uses.
     pub fn add_buffer(&mut self, buffer: BufferId) -> &mut Self {
@@ -392,14 +456,8 @@ where
     T: ?Sized,
     N: NodeDesc<B, T>,
 {
-    fn family(&self, _factory: &mut Factory<B>, families: &[Family<B>]) -> Option<FamilyId> {
-        families
-            .iter()
-            .find(|family| {
-                Supports::<<N::Node as Node<B, T>>::Capability>::supports(&family.capability())
-                    .is_some()
-            })
-            .map(|family| family.id())
+    fn family(&self, _factory: &mut Factory<B>, families: &Families<B>) -> Option<FamilyId> {
+        families.with_capability::<<N::Node as Node<B, T>>::Capability>()
     }
 
     fn buffers(&self) -> Vec<(BufferId, BufferAccess)> {
@@ -429,7 +487,7 @@ where
         aux: &T,
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
-    ) -> Result<Box<dyn DynNode<B, T>>, failure::Error> {
+    ) -> Result<Box<dyn DynNode<B, T>>, NodeBuildError> {
         Ok(Box::new((self.desc.build(
             ctx, factory, family, queue, aux, buffers, images,
         )?,)))
@@ -442,23 +500,23 @@ pub fn gfx_acquire_barriers<'a, 'b, B: Backend>(
     buffers: impl IntoIterator<Item = &'b NodeBuffer>,
     images: impl IntoIterator<Item = &'b NodeImage>,
 ) -> (
-    std::ops::Range<gfx_hal::pso::PipelineStage>,
-    Vec<gfx_hal::memory::Barrier<'a, B>>,
+    std::ops::Range<rendy_core::hal::pso::PipelineStage>,
+    Vec<rendy_core::hal::memory::Barrier<'a, B>>,
 ) {
-    let mut bstart = gfx_hal::pso::PipelineStage::empty();
-    let mut bend = gfx_hal::pso::PipelineStage::empty();
+    let mut bstart = rendy_core::hal::pso::PipelineStage::empty();
+    let mut bend = rendy_core::hal::pso::PipelineStage::empty();
 
-    let mut istart = gfx_hal::pso::PipelineStage::empty();
-    let mut iend = gfx_hal::pso::PipelineStage::empty();
+    let mut istart = rendy_core::hal::pso::PipelineStage::empty();
+    let mut iend = rendy_core::hal::pso::PipelineStage::empty();
 
-    let barriers: Vec<gfx_hal::memory::Barrier<'_, B>> = buffers
+    let barriers: Vec<rendy_core::hal::memory::Barrier<'_, B>> = buffers
         .into_iter()
         .filter_map(|buffer| {
             buffer.acquire.as_ref().map(|acquire| {
                 bstart |= acquire.stages.start;
                 bend |= acquire.stages.end;
 
-                gfx_hal::memory::Barrier::Buffer {
+                rendy_core::hal::memory::Barrier::Buffer {
                     states: acquire.states.clone(),
                     families: acquire.families.clone(),
                     target: ctx
@@ -474,7 +532,7 @@ pub fn gfx_acquire_barriers<'a, 'b, B: Backend>(
                 istart |= acquire.stages.start;
                 iend |= acquire.stages.end;
 
-                gfx_hal::memory::Barrier::Image {
+                rendy_core::hal::memory::Barrier::Image {
                     states: acquire.states.clone(),
                     families: acquire.families.clone(),
                     target: ctx.get_image(image.id).expect("Image does not exist").raw(),
@@ -493,23 +551,23 @@ pub fn gfx_release_barriers<'a, B: Backend>(
     buffers: impl IntoIterator<Item = &'a NodeBuffer>,
     images: impl IntoIterator<Item = &'a NodeImage>,
 ) -> (
-    std::ops::Range<gfx_hal::pso::PipelineStage>,
-    Vec<gfx_hal::memory::Barrier<'a, B>>,
+    std::ops::Range<rendy_core::hal::pso::PipelineStage>,
+    Vec<rendy_core::hal::memory::Barrier<'a, B>>,
 ) {
-    let mut bstart = gfx_hal::pso::PipelineStage::empty();
-    let mut bend = gfx_hal::pso::PipelineStage::empty();
+    let mut bstart = rendy_core::hal::pso::PipelineStage::empty();
+    let mut bend = rendy_core::hal::pso::PipelineStage::empty();
 
-    let mut istart = gfx_hal::pso::PipelineStage::empty();
-    let mut iend = gfx_hal::pso::PipelineStage::empty();
+    let mut istart = rendy_core::hal::pso::PipelineStage::empty();
+    let mut iend = rendy_core::hal::pso::PipelineStage::empty();
 
-    let barriers: Vec<gfx_hal::memory::Barrier<'_, B>> = buffers
+    let barriers: Vec<rendy_core::hal::memory::Barrier<'_, B>> = buffers
         .into_iter()
         .filter_map(|buffer| {
             buffer.release.as_ref().map(|release| {
                 bstart |= release.stages.start;
                 bend |= release.stages.end;
 
-                gfx_hal::memory::Barrier::Buffer {
+                rendy_core::hal::memory::Barrier::Buffer {
                     states: release.states.clone(),
                     families: release.families.clone(),
                     target: ctx
@@ -525,7 +583,7 @@ pub fn gfx_release_barriers<'a, B: Backend>(
                 istart |= release.stages.start;
                 iend |= release.stages.end;
 
-                gfx_hal::memory::Barrier::Image {
+                rendy_core::hal::memory::Barrier::Image {
                     states: release.states.clone(),
                     families: release.families.clone(),
                     target: ctx.get_image(image.id).expect("Image does not exist").raw(),
@@ -536,18 +594,4 @@ pub fn gfx_release_barriers<'a, B: Backend>(
         .collect();
 
     (bstart | istart..bend | iend, barriers)
-}
-
-rendy_with_metal_backend! {
-    /// Check if backend is metal.
-    pub fn is_metal<B: Backend>() -> bool {
-        std::any::TypeId::of::<B>() == std::any::TypeId::of::<rendy_util::metal::Backend>()
-    }
-}
-
-rendy_without_metal_backend! {
-    /// Check if backend is metal.
-    pub fn is_metal<B: Backend>() -> bool {
-        false
-    }
 }

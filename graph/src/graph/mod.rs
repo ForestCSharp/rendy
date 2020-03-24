@@ -2,15 +2,20 @@ use {
     crate::{
         chain,
         command::{Families, FamilyId, QueueId},
+        core::{device_owned, DeviceId},
         factory::Factory,
         frame::{Fences, Frame, Frames},
         memory::Data,
-        node::{BufferBarrier, DynNode, ImageBarrier, NodeBuffer, NodeBuilder, NodeImage},
-        resource::{Buffer, BufferInfo, Handle, Image, ImageInfo},
-        util::{device_owned, DeviceId},
+        node::{
+            BufferBarrier, DynNode, ImageBarrier, NodeBuffer, NodeBuildError, NodeBuilder,
+            NodeImage,
+        },
+        resource::{
+            Buffer, BufferCreationError, BufferInfo, Handle, Image, ImageCreationError, ImageInfo,
+        },
         BufferId, ImageId, NodeId,
     },
-    gfx_hal::{queue::QueueFamilyId, Backend},
+    rendy_core::hal::{queue::QueueFamilyId, Backend},
     thread_profiler::profile_scope,
 };
 
@@ -35,11 +40,67 @@ pub struct Graph<B: Backend, T: ?Sized> {
 
 device_owned!(Graph<B, T: ?Sized>);
 
+/// Error building the graph itself or one of it's nodes.
+#[derive(Debug)]
+pub enum GraphBuildError {
+    /// Failed to create a buffer.
+    Buffer(BufferCreationError),
+    /// Failed to create an image.
+    Image(ImageCreationError),
+    /// Failed to create a semaphore.
+    Semaphore(rendy_core::hal::device::OutOfMemory),
+    /// Failed to build a node.
+    Node(NodeBuildError),
+}
+
+impl std::fmt::Display for GraphBuildError {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GraphBuildError::Buffer(err) => write!(
+                fmt,
+                "Failed to build graph because of failure to create a buffer: {:?}",
+                err
+            ),
+            GraphBuildError::Image(err) => write!(
+                fmt,
+                "Failed to build graph because of failure to create an image: {:?}",
+                err
+            ),
+            GraphBuildError::Semaphore(err) => write!(
+                fmt,
+                "Failed to build graph because of failure to create a semaphore: {:?}",
+                err
+            ),
+            GraphBuildError::Node(err) => write!(
+                fmt,
+                "Failed to build graph because of failure to build a node: {:?}",
+                err
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GraphBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            GraphBuildError::Buffer(err) => Some(err),
+            GraphBuildError::Image(err) => Some(err),
+            GraphBuildError::Semaphore(err) => Some(err),
+            GraphBuildError::Node(err) => Some(err),
+        }
+    }
+}
+
 /// Graphics context contains all transient resources managed by graph.
 #[derive(Debug)]
 pub struct GraphContext<B: Backend> {
     buffers: Vec<Option<Handle<Buffer<B>>>>,
-    images: Vec<Option<(Handle<Image<B>>, Option<gfx_hal::command::ClearValue>)>>,
+    images: Vec<
+        Option<(
+            Handle<Image<B>>,
+            Option<rendy_core::hal::command::ClearValue>,
+        )>,
+    >,
     /// Number of potential frames in flight
     pub frames_in_flight: u32,
 }
@@ -49,9 +110,9 @@ impl<B: Backend> GraphContext<B> {
         factory: &Factory<B>,
         chains: &chain::Chains,
         buffers: impl IntoIterator<Item = &'a BufferInfo>,
-        images: impl IntoIterator<Item = &'a (ImageInfo, Option<gfx_hal::command::ClearValue>)>,
+        images: impl IntoIterator<Item = &'a (ImageInfo, Option<rendy_core::hal::command::ClearValue>)>,
         frames_in_flight: u32,
-    ) -> Result<Self, failure::Error> {
+    ) -> Result<Self, GraphBuildError> {
         profile_scope!("alloc");
 
         log::trace!("Allocate buffers");
@@ -75,7 +136,8 @@ impl<B: Backend> GraphContext<B> {
                     })
                     .unwrap_or(Ok(None))
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()
+            .map_err(GraphBuildError::Buffer)?;
 
         log::trace!("Allocate images");
         let images: Vec<Option<(Handle<Image<B>>, _)>> = images
@@ -98,9 +160,14 @@ impl<B: Backend> GraphContext<B> {
                     })
                     .unwrap_or(Ok(None))
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()
+            .map_err(GraphBuildError::Image)?;
 
-        Ok(Self { buffers, images, frames_in_flight })
+        Ok(Self {
+            buffers,
+            images,
+            frames_in_flight,
+        })
     }
 
     /// Get reference to transient image by id.
@@ -112,7 +179,10 @@ impl<B: Backend> GraphContext<B> {
     pub fn get_image_with_clear(
         &self,
         id: ImageId,
-    ) -> Option<(&Handle<Image<B>>, Option<gfx_hal::command::ClearValue>)> {
+    ) -> Option<(
+        &Handle<Image<B>>,
+        Option<rendy_core::hal::command::ClearValue>,
+    )> {
         self.images
             .get(id.0)
             .and_then(|x| x.as_ref())
@@ -258,12 +328,41 @@ where
 }
 
 /// Build graph from nodes and resource.
-#[derive(Debug)]
 pub struct GraphBuilder<B: Backend, T: ?Sized> {
     nodes: Vec<Box<dyn NodeBuilder<B, T>>>,
     buffers: Vec<BufferInfo>,
-    images: Vec<(ImageInfo, Option<gfx_hal::command::ClearValue>)>,
+    images: Vec<(ImageInfo, Option<rendy_core::hal::command::ClearValue>)>,
     frames_in_flight: u32,
+}
+
+impl<B, T> Default for GraphBuilder<B, T>
+where
+    B: Backend,
+    T: ?Sized,
+{
+    fn default() -> Self {
+        GraphBuilder {
+            nodes: Vec::default(),
+            buffers: Vec::default(),
+            images: Vec::default(),
+            frames_in_flight: u32::default(),
+        }
+    }
+}
+
+impl<B, T> std::fmt::Debug for GraphBuilder<B, T>
+where
+    B: Backend,
+    T: ?Sized,
+{
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("GraphBuilder")
+            .field("nodes", &self.nodes)
+            .field("buffers", &self.buffers)
+            .field("images", &self.images)
+            .field("frames_in_flight", &self.frames_in_flight)
+            .finish()
+    }
 }
 
 impl<B, T> GraphBuilder<B, T>
@@ -287,7 +386,7 @@ where
 
         self.buffers.push(BufferInfo {
             size,
-            usage: gfx_hal::buffer::Usage::empty(),
+            usage: rendy_core::hal::buffer::Usage::empty(),
         });
         BufferId(self.buffers.len() - 1)
     }
@@ -295,10 +394,10 @@ where
     /// Create new image owned by graph.
     pub fn create_image(
         &mut self,
-        kind: gfx_hal::image::Kind,
-        levels: gfx_hal::image::Level,
-        format: gfx_hal::format::Format,
-        clear: Option<gfx_hal::command::ClearValue>,
+        kind: rendy_core::hal::image::Kind,
+        levels: rendy_core::hal::image::Level,
+        format: rendy_core::hal::format::Format,
+        clear: Option<rendy_core::hal::command::ClearValue>,
     ) -> ImageId {
         profile_scope!("create_image");
 
@@ -307,9 +406,9 @@ where
                 kind,
                 levels,
                 format,
-                tiling: gfx_hal::image::Tiling::Optimal,
-                view_caps: gfx_hal::image::ViewCapabilities::empty(),
-                usage: gfx_hal::image::Usage::empty(),
+                tiling: rendy_core::hal::image::Tiling::Optimal,
+                view_caps: rendy_core::hal::image::ViewCapabilities::empty(),
+                usage: rendy_core::hal::image::Usage::empty(),
             },
             clear,
         ));
@@ -318,9 +417,12 @@ where
 
     /// Add node to the graph.
     pub fn add_node<N: NodeBuilder<B, T> + 'static>(&mut self, builder: N) -> NodeId {
-        profile_scope!("add_node");
+        self.add_dyn_node(Box::new(builder))
+    }
 
-        self.nodes.push(Box::new(builder));
+    /// Add boxed node to the graph.
+    pub fn add_dyn_node(&mut self, builder: Box<dyn NodeBuilder<B, T> + 'static>) -> NodeId {
+        self.nodes.push(builder);
         NodeId(self.nodes.len() - 1)
     }
 
@@ -346,7 +448,7 @@ where
         factory: &mut Factory<B>,
         families: &mut Families<B>,
         aux: &T,
-    ) -> Result<Graph<B, T>, failure::Error> {
+    ) -> Result<Graph<B, T>, GraphBuildError> {
         profile_scope!("build");
 
         log::trace!("Schedule nodes execution");
@@ -380,7 +482,7 @@ where
             (id, id)
         });
         schedule.build_order();
-        log::info!("Schedule: {:#?}", schedule);
+        log::trace!("Schedule: {:#?}", schedule);
 
         log::trace!("Build nodes");
         let mut built_nodes: Vec<_> = (0..self.nodes.len()).map(|_| None).collect();
@@ -406,7 +508,8 @@ where
                             aux,
                             &chains,
                             &submission,
-                        )?;
+                        )
+                        .map_err(GraphBuildError::Node)?;
                         log::debug!("Node built: {:#?}", node);
                         built_nodes[submission.node()] = Some((node, submission.id().queue()));
                     }
@@ -417,7 +520,8 @@ where
         log::debug!("Create {} semaphores", semaphores.start);
         let semaphores = (0..semaphores.start)
             .map(|_| factory.create_semaphore())
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>()
+            .map_err(GraphBuildError::Semaphore)?;
 
         Ok(Graph {
             device: factory.device().id(),
@@ -448,7 +552,7 @@ fn build_node<'a, B: Backend, T: ?Sized>(
     aux: &T,
     chains: &chain::Chains,
     submission: &chain::Submission<chain::SyncData<usize, usize>>,
-) -> Result<Box<dyn DynNode<B, T>>, failure::Error> {
+) -> Result<Box<dyn DynNode<B, T>>, NodeBuildError> {
     let mut buffer_ids: Vec<_> = builder.buffers().into_iter().map(|(id, _)| id).collect();
     buffer_ids.sort();
     buffer_ids.dedup();
@@ -497,7 +601,7 @@ fn build_node<'a, B: Backend, T: ?Sized>(
                 .expect("Image referenced from at least one node must be instantiated");
             NodeImage {
                 id,
-                range: gfx_hal::image::SubresourceRange {
+                range: rendy_core::hal::image::SubresourceRange {
                     aspects: image.format().surface_desc().aspects,
                     levels: 0..image.levels(),
                     layers: 0..image.layers(),
@@ -508,7 +612,14 @@ fn build_node<'a, B: Backend, T: ?Sized>(
                 clear: if link == 0 { clear } else { None },
                 acquire: sync.acquire.images.get(&chain_id).map(
                     |chain::Barrier { states, families }| ImageBarrier {
-                        states: (states.start.0, states.start.1)..(states.end.0, states.end.1),
+                        states: (
+                            states.start.0,
+                            if link == 0 {
+                                rendy_core::hal::image::Layout::Undefined
+                            } else {
+                                states.start.1
+                            },
+                        )..(states.end.0, states.end.1),
                         stages: states.start.2..states.end.2,
                         families: families.clone(),
                     },
@@ -540,7 +651,7 @@ where
     let images = builder.images();
     chain::Node {
         id,
-        family: QueueFamilyId(builder.family(factory, families.as_slice()).unwrap().index),
+        family: QueueFamilyId(builder.family(factory, families).unwrap().index),
         dependencies: builder.dependencies().into_iter().map(|id| id.0).collect(),
         buffers: buffers
             .into_iter()

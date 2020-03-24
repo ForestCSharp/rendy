@@ -1,6 +1,6 @@
 [package]
 name = "rendy-texture"
-version = "0.2.0"
+version = "0.5.1"
 authors = ["omni-viral <scareaangel@gmail.com>"]
 edition = "2018"
 repository = "https://github.com/amethyst/rendy"
@@ -11,22 +11,18 @@ categories = ["rendering"]
 description = "Rendy's texture"
 
 [features]
-no-slow-safety-checks = ["rendy-util/no-slow-safety-checks"]
-serde-1 = ["serde", "gfx-hal/serde"]
+no-slow-safety-checks = ["rendy-core/no-slow-safety-checks"]
+serde-1 = ["serde", "rendy-core/serde-1"]
 profile = ["thread_profiler/thread_profiler"]
 
 [dependencies]
-rendy-memory = { version = "0.2.0", path = "../memory" }
-rendy-resource = { version = "0.2.0", path = "../resource" }
-rendy-factory = { version = "0.2.0", path = "../factory" }
-rendy-util = { version = "0.2.0", path = "../util" }
+rendy-memory = { version = "0.5.2", path = "../memory" }
+rendy-resource = { version = "0.5.1", path = "../resource" }
+rendy-factory = { version = "0.5.1", path = "../factory" }
+rendy-core = { version = "0.5.1", path = "../core" }
 
-gfx-hal = "0.2"
-
-derivative = "1.0"
-failure = "0.1"
 serde = { version = "1.0", optional = true }
-image = { version = "0.21.0", optional = true }
+image = { version = "0.22.0", optional = true }
 palette = { version = "0.4", optional = true }
 log = "0.4"
 thread_profiler = "0.3"

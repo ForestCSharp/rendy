@@ -1,15 +1,99 @@
-use gfx_hal::pso::ShaderStageFlags;
-use rendy_util::types::{vertex::VertexFormat, Layout, SetLayout};
+use rendy_core::hal::pso::ShaderStageFlags;
+use rendy_core::types::{vertex::VertexFormat, Layout, SetLayout};
 use spirv_reflect::ShaderModule;
 use std::collections::HashMap;
 use std::ops::{Bound, Range, RangeBounds};
 
 pub(crate) mod types;
+pub use types::ReflectTypeError;
 use types::*;
+
+/// The item kind that couldn't be retrieved from spirv-reflect.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RetrievalKind {
+    /// Input attributes.
+    InputAttrib,
+    /// Output attributes.
+    OutputAttrib,
+    /// Descriptor sets.
+    DescriptorSets,
+    /// Push constants.
+    PushConstants,
+}
+
+impl RetrievalKind {
+    fn as_str(&self) -> &'static str {
+        match *self {
+            RetrievalKind::InputAttrib => "input attributes",
+            RetrievalKind::OutputAttrib => "output attributes",
+            RetrievalKind::DescriptorSets => "descriptor sets",
+            RetrievalKind::PushConstants => "push constants",
+        }
+    }
+}
+
+/// A reflection error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReflectError {
+    /// An item could not be retrieved from spirv-reflect.
+    Retrieval(RetrievalKind, String),
+    /// A spirv-reflect error occured.
+    General(String),
+    /// An attribute by the given name does not exist.
+    NameDoesNotExist(String),
+    /// The cache wasn't constructed for the shader.
+    CacheNotConstructued(ShaderStageFlags),
+    /// The bindings between the shaders of a set did not match.
+    BindingsMismatch(usize),
+    /// The SpirvCachedGfxDescription was not created.
+    SpirvCachedGfxDescription,
+    /// An error occured while reflecting a type.
+    Type(ReflectTypeError),
+    /// Neither a vertex nor a compute shader has been provided.
+    NoVertComputeProvided,
+}
+
+impl std::error::Error for ReflectError {}
+impl std::fmt::Display for ReflectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReflectError::Retrieval(kind, msg) => write!(
+                f,
+                "failed to get {} from spirv-reflect: {}",
+                kind.as_str(),
+                msg
+            ),
+            ReflectError::General(msg) => write!(f, "{}", msg),
+            ReflectError::NameDoesNotExist(name) => {
+                write!(f, "attribute named {} does not exist", name)
+            }
+            ReflectError::CacheNotConstructued(flags) => {
+                write!(f, "cache isn't constructed for shader: {:?}", flags)
+            }
+            ReflectError::BindingsMismatch(set) => {
+                write!(f, "mismatching bindings between shaders for set {}", set)
+            }
+            ReflectError::SpirvCachedGfxDescription => write!(
+                f,
+                "SpirvCachedGfxDescription not created for this reflection"
+            ),
+            ReflectError::Type(e) => write!(f, "{}", e),
+            ReflectError::NoVertComputeProvided => {
+                write!(f, "a vertex or compute shader must be provided")
+            }
+        }
+    }
+}
+
+impl From<ReflectTypeError> for ReflectError {
+    fn from(e: ReflectTypeError) -> Self {
+        ReflectError::Type(e)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct SpirvCachedGfxDescription {
-    pub vertices: (Vec<(u32, String, u8, gfx_hal::format::Format)>),
+    pub vertices: Vec<(u32, String, u8, rendy_core::hal::format::Format)>,
     pub layout: Layout,
 }
 
@@ -17,11 +101,11 @@ pub(crate) struct SpirvCachedGfxDescription {
 #[derive(Clone, Debug)]
 pub struct SpirvReflection {
     /// Vec of output variables with names.
-    pub output_attributes: HashMap<(String, u8), gfx_hal::pso::AttributeDesc>,
+    pub output_attributes: HashMap<(String, u8), rendy_core::hal::pso::AttributeDesc>,
     /// Vec of output variables with names.
-    pub input_attributes: HashMap<(String, u8), gfx_hal::pso::AttributeDesc>,
+    pub input_attributes: HashMap<(String, u8), rendy_core::hal::pso::AttributeDesc>,
     /// Hashmap of output variables with names.
-    pub descriptor_sets: Vec<Vec<gfx_hal::pso::DescriptorSetLayoutBinding>>,
+    pub descriptor_sets: Vec<Vec<rendy_core::hal::pso::DescriptorSetLayoutBinding>>,
     /// Stage flag of this shader
     pub stage_flag: ShaderStageFlags,
     /// Push Constants
@@ -33,6 +117,7 @@ pub struct SpirvReflection {
     /// Cached value of gfx-hal specific data
     pub(crate) cache: Option<SpirvCachedGfxDescription>,
 }
+
 impl Default for SpirvReflection {
     fn default() -> Self {
         Self {
@@ -53,11 +138,11 @@ impl SpirvReflection {
         stage_flag: ShaderStageFlags,
         entrypoint: Option<String>,
         entrypoints: Vec<(ShaderStageFlags, String)>,
-        input_attributes: HashMap<(String, u8), gfx_hal::pso::AttributeDesc>,
-        output_attributes: HashMap<(String, u8), gfx_hal::pso::AttributeDesc>,
-        descriptor_sets: Vec<Vec<gfx_hal::pso::DescriptorSetLayoutBinding>>,
+        input_attributes: HashMap<(String, u8), rendy_core::hal::pso::AttributeDesc>,
+        output_attributes: HashMap<(String, u8), rendy_core::hal::pso::AttributeDesc>,
+        descriptor_sets: Vec<Vec<rendy_core::hal::pso::DescriptorSetLayoutBinding>>,
         push_constants: Vec<(ShaderStageFlags, Range<u32>)>,
-    ) -> Result<Self, failure::Error> {
+    ) -> Result<Self, ReflectError> {
         Ok(SpirvReflection {
             output_attributes,
             input_attributes,
@@ -70,7 +155,7 @@ impl SpirvReflection {
         })
     }
 
-    pub(crate) fn compile_cache(mut self) -> Result<Self, failure::Error> {
+    pub(crate) fn compile_cache(mut self) -> Result<Self, ReflectError> {
         // BBreak apart the sets into the appropriate grouping
 
         let layout = if self.descriptor_sets.len() > 0 {
@@ -105,45 +190,35 @@ impl SpirvReflection {
 
     /// This function performs the actual SPIRV reflection utilizing spirv-reflect-rs, and then converting it into appropriate structures which are then consumed by rendy.
     pub fn reflect(
-        spirv: &[u8],
+        spirv: &[u32],
         entrypoint: Option<&str>,
-    ) -> Result<SpirvReflection, failure::Error> {
-        match ShaderModule::load_u8_data(spirv) {
+    ) -> Result<SpirvReflection, ReflectError> {
+        match ShaderModule::load_u32_data(spirv) {
             Ok(module) => {
                 let stage_flag = convert_stage(module.get_shader_stage());
 
                 let input_attributes =
                     generate_attributes(module.enumerate_input_variables(None).map_err(|e| {
-                        failure::format_err!(
-                            "Failed to get input attributes from spirv-reflect: {}",
-                            e
-                        )
+                        ReflectError::Retrieval(RetrievalKind::InputAttrib, e.to_string())
                     })?);
 
                 let output_attributes =
                     generate_attributes(module.enumerate_input_variables(None).map_err(|e| {
-                        failure::format_err!(
-                            "Failed to get output attributes from spirv-reflect: {}",
-                            e
-                        )
+                        ReflectError::Retrieval(RetrievalKind::OutputAttrib, e.to_string())
                     })?);
 
                 let descriptor_sets: Result<Vec<_>, _> = module
                     .enumerate_descriptor_sets(None)
                     .map_err(|e| {
-                        failure::format_err!(
-                            "Failed to get descriptor sets from spirv-reflect: {}",
-                            e
-                        )
+                        ReflectError::Retrieval(RetrievalKind::DescriptorSets, e.to_string())
                     })?
                     .iter()
-                    .map(ReflectInto::<Vec<gfx_hal::pso::DescriptorSetLayoutBinding>>::reflect_into)
+                    .map(ReflectInto::<Vec<rendy_core::hal::pso::DescriptorSetLayoutBinding>>::reflect_into)
                     .collect();
 
                 // This is a fixup-step required because of our implementation. Because we dont pass the module around
                 // to the all the reflect_into API's, we need to fix up the shader stage here at the end. Kinda a hack
-                let mut descriptor_sets_final = descriptor_sets
-                    .map_err(|e| failure::format_err!("Failed to parse descriptor sets:: {}", e))?;
+                let mut descriptor_sets_final = descriptor_sets?;
                 descriptor_sets_final.iter_mut().for_each(|v| {
                     v.iter_mut()
                         .for_each(|mut set| set.stage_flags = stage_flag);
@@ -152,10 +227,7 @@ impl SpirvReflection {
                 let push_constants: Result<Vec<_>, _> = module
                     .enumerate_push_constant_blocks(None)
                     .map_err(|e| {
-                        failure::format_err!(
-                            "Failed to get push constants from spirv-reflect: {}",
-                            e
-                        )
+                        ReflectError::Retrieval(RetrievalKind::PushConstants, e.to_string())
                     })?
                     .iter()
                     .map(|c| convert_push_constant(stage_flag, c))
@@ -168,26 +240,26 @@ impl SpirvReflection {
                     Some(entrypoint.to_string()),
                     vec![(stage_flag, module.get_entry_point_name())],
                     input_attributes.map_err(|e| {
-                        failure::format_err!("Error parsing input attributes: {}", e)
+                        ReflectError::Retrieval(RetrievalKind::InputAttrib, e.to_string())
                     })?,
                     output_attributes.map_err(|e| {
-                        failure::format_err!("Error parsing output attributes: {}", e)
+                        ReflectError::Retrieval(RetrievalKind::OutputAttrib, e.to_string())
                     })?,
                     descriptor_sets_final,
                     push_constants?,
                 )
             }
-            Err(e) => failure::bail!("Failed to reflect data: {}", e),
+            Err(e) => return Err(ReflectError::General(e.to_string())),
         }
     }
 
-    /// Returns attributes based on their names in rendy/gfx_hal format in the form of a `VertexFormat`. Note that attributes are sorted in their layout location
+    /// Returns attributes based on their names in rendy/rendy_core::hal format in the form of a `VertexFormat`. Note that attributes are sorted in their layout location
     /// order, not in the order provided.
-    pub fn attributes(&self, names: &[&str]) -> Result<VertexFormat, failure::Error> {
-        let cache = self.cache.as_ref().ok_or(failure::format_err!(
-            "Cache isn't constructed for shader: {:?}",
-            self.stage()
-        ))?;
+    pub fn attributes(&self, names: &[&str]) -> Result<VertexFormat, ReflectError> {
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or(ReflectError::CacheNotConstructued(self.stage()))?;
         let mut attributes = smallvec::SmallVec::<[_; 64]>::new();
 
         for name in names {
@@ -200,7 +272,7 @@ impl SpirvReflection {
             let before = attributes.len();
             attributes.extend(this_name_attributes);
             if attributes.len() == before {
-                failure::bail!("Attribute named {} does not exist", name);
+                return Err(ReflectError::NameDoesNotExist(name.to_string()));
             }
         }
         attributes.sort_by_key(|a| a.0);
@@ -213,15 +285,15 @@ impl SpirvReflection {
         ))
     }
 
-    /// Returns attributes within a given index range in rendy/gfx_hal format in the form of a `VertexFormat`
+    /// Returns attributes within a given index range in rendy/rendy_core::hal format in the form of a `VertexFormat`
     pub fn attributes_range<R: RangeBounds<u32>>(
         &self,
         range: R,
-    ) -> Result<VertexFormat, failure::Error> {
-        let cache = self.cache.as_ref().ok_or(failure::format_err!(
-            "Cache isn't constructed for shader: {:?}",
-            self.stage()
-        ))?;
+    ) -> Result<VertexFormat, ReflectError> {
+        let cache = self
+            .cache
+            .as_ref()
+            .ok_or(ReflectError::CacheNotConstructued(self.stage()))?;
 
         let attributes = cache
             .vertices
@@ -233,15 +305,13 @@ impl SpirvReflection {
         Ok(VertexFormat::new(attributes))
     }
 
-    /// Returns the merged descriptor set layouts of all shaders in this set in gfx_hal format in the form of a `Layout` structure.
+    /// Returns the merged descriptor set layouts of all shaders in this set in rendy_core::hal format in the form of a `Layout` structure.
     #[inline(always)]
-    pub fn layout(&self) -> Result<Layout, failure::Error> {
+    pub fn layout(&self) -> Result<Layout, ReflectError> {
         Ok(self
             .cache
             .as_ref()
-            .ok_or(failure::format_err!(
-                "SpirvCachedGfxDescription not created for this reflection"
-            ))?
+            .ok_or(ReflectError::SpirvCachedGfxDescription)?
             .layout
             .clone())
     }
@@ -252,12 +322,12 @@ impl SpirvReflection {
         self.stage_flag
     }
 
-    /// Returns the reflected push constants of this shader set in gfx_hal format.
+    /// Returns the reflected push constants of this shader set in rendy_core::hal format.
     #[inline]
     pub fn push_constants(
         &self,
         range: Option<Range<usize>>,
-    ) -> Result<Vec<(ShaderStageFlags, Range<u32>)>, failure::Error> {
+    ) -> Result<Vec<(ShaderStageFlags, Range<u32>)>, ReflectError> {
         if range.is_some() {
             Ok(self
                 .push_constants
@@ -276,8 +346,8 @@ impl SpirvReflection {
     }
 }
 
-pub(crate) fn merge(reflections: &[SpirvReflection]) -> Result<SpirvReflection, failure::Error> {
-    let mut descriptor_sets = Vec::<Vec<gfx_hal::pso::DescriptorSetLayoutBinding>>::new();
+pub(crate) fn merge(reflections: &[SpirvReflection]) -> Result<SpirvReflection, ReflectError> {
+    let mut descriptor_sets = Vec::<Vec<rendy_core::hal::pso::DescriptorSetLayoutBinding>>::new();
     let mut set_push_constants = Vec::new();
     let mut set_stage_flags = ShaderStageFlags::empty();
     let mut set_entry_points = Vec::new();
@@ -301,10 +371,7 @@ pub(crate) fn merge(reflections: &[SpirvReflection]) -> Result<SpirvReflection, 
             {
                 None => descriptor_sets.push(set.clone()),
                 Some(SetEquality::NotEqual) => {
-                    return Err(failure::format_err!(
-                        "Mismatching bindings between shaders for set #{}",
-                        n
-                    ));
+                    return Err(ReflectError::BindingsMismatch(n));
                 }
                 Some(SetEquality::SupersetOf) => {
                     descriptor_sets[n] = set.clone(); // Overwrite it
@@ -345,8 +412,8 @@ pub enum BindingEquality {
 
 /// Logically compares two descriptor layout bindings to determine their relational equality.
 pub fn compare_bindings(
-    lhv: &gfx_hal::pso::DescriptorSetLayoutBinding,
-    rhv: &gfx_hal::pso::DescriptorSetLayoutBinding,
+    lhv: &rendy_core::hal::pso::DescriptorSetLayoutBinding,
+    rhv: &rendy_core::hal::pso::DescriptorSetLayoutBinding,
 ) -> BindingEquality {
     if lhv.binding == rhv.binding
         && lhv.count == rhv.count
@@ -380,8 +447,8 @@ enum SetEquality {
 }
 
 fn compare_set(
-    lhv: &[gfx_hal::pso::DescriptorSetLayoutBinding],
-    rhv: &[gfx_hal::pso::DescriptorSetLayoutBinding],
+    lhv: &[rendy_core::hal::pso::DescriptorSetLayoutBinding],
+    rhv: &[rendy_core::hal::pso::DescriptorSetLayoutBinding],
 ) -> SetEquality {
     // Bindings may not be in order, so we need to make a copy and index them by binding.
     let mut lhv_bindings = HashMap::new();

@@ -55,7 +55,7 @@ This means users can't accidentally:
 
 `rendy`'s memory manager is called `Heaps`.
 `Heaps` provides convenient methods to sub-allocate device-visible memory based on usage and visibility requirements. It also handles mapping for specific usage types.
-**It is possible for [`gfx-hal`] to adopt VMA. In which case `rendy` will use it**
+**It is possible for [`gfx-hal`] to adopt [VMA]. In which case `rendy` will use it**
 
 ### Rendergraph
 
@@ -64,7 +64,7 @@ Note that this is not a scene graph offered by high-level graphics libraries, wh
 the graph correspond to complex objects in the world.  Instead it is a graph of render passes
 with different properties.
 This makes it much easier to compose a complex frame from simple parts.
-A ser defines nodes which declare which buffers and images it reads and writes and
+A user defines nodes which declare which buffers and images it reads and writes and
 the rendergraph takes responsibility for transient resource allocation and execution synchronization.
 The user is responsible only for intra-node synchronization.
 
@@ -135,9 +135,14 @@ This helps to keep API clean and hopefully sound.
 The top-level umbrella crate `rendy` has features for each subcrate so that they could be
 enabled separately (enabling a subcrate will also enable its dependencies).
 
+## [Changelog]
+
 ## Who is using it?
 
-The first project to use `rendy` is expected to be the [`Amethyst`] project. Kindly open a PR or issue if you're aware of other projects using `rendy`.
+* The [`Amethyst`](https://github.com/amethyst/) project
+* [wgpu-rs](https://github.com/gfx-rs/wgpu-rs)
+
+Kindly open a PR or issue if you're aware of other projects using `rendy`.
 
 ## License
 
@@ -157,3 +162,5 @@ at your option.
 [`Vulkan`]: https://www.khronos.org/vulkan/
 [`Vulkan`-portability]: https://www.khronos.org/vulkan/portability-initiative
 [`Amethyst`]: https://github.com/amethyst/amethyst
+[VMA]: https://gpuopen.com/gaming-product/vulkan-memory-allocator/
+[Changelog]: CHANGELOG.md

@@ -12,6 +12,7 @@ mod family;
 mod queue;
 mod submission;
 
+use std::collections::HashMap;
 use std::ops::{Index, IndexMut};
 
 pub use self::{
@@ -23,7 +24,7 @@ pub use self::{
 /// Whole passes schedule.
 #[derive(Clone, Debug)]
 pub struct Schedule<S> {
-    map: fnv::FnvHashMap<gfx_hal::queue::QueueFamilyId, Family<S>>,
+    map: HashMap<rendy_core::hal::queue::QueueFamilyId, Family<S>>,
     ordered: Vec<SubmissionId>,
 }
 
@@ -31,7 +32,7 @@ impl<S> Schedule<S> {
     /// Create new empty `Schedule`
     pub fn new() -> Self {
         Schedule {
-            map: fnv::FnvHashMap::default(),
+            map: HashMap::default(),
             ordered: Vec::new(),
         }
     }
@@ -71,12 +72,15 @@ impl<S> Schedule<S> {
     }
 
     /// Get reference to `Family` instance by the id.
-    pub fn family(&self, fid: gfx_hal::queue::QueueFamilyId) -> Option<&Family<S>> {
+    pub fn family(&self, fid: rendy_core::hal::queue::QueueFamilyId) -> Option<&Family<S>> {
         self.map.get(&fid)
     }
 
     /// Get mutable reference to `Family` instance by the id.
-    pub fn family_mut(&mut self, fid: gfx_hal::queue::QueueFamilyId) -> Option<&mut Family<S>> {
+    pub fn family_mut(
+        &mut self,
+        fid: rendy_core::hal::queue::QueueFamilyId,
+    ) -> Option<&mut Family<S>> {
         self.map.get_mut(&fid)
     }
 
@@ -106,7 +110,7 @@ impl<S> Schedule<S> {
 
     /// Get mutable reference to `Family` instance by the id.
     /// This function will add empty `Family` if id is not present.
-    pub fn ensure_family(&mut self, fid: gfx_hal::queue::QueueFamilyId) -> &mut Family<S> {
+    pub fn ensure_family(&mut self, fid: rendy_core::hal::queue::QueueFamilyId) -> &mut Family<S> {
         self.map.entry(fid).or_insert_with(|| Family::new(fid))
     }
 

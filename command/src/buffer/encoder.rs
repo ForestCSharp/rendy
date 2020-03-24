@@ -68,10 +68,8 @@ pub struct DispatchCommand {
 }
 
 /// Encoder for recording commands inside or outside renderpass.
-#[derive(derivative::Derivative)]
-#[derivative(Debug)]
-pub struct EncoderCommon<'a, B: gfx_hal::Backend, C> {
-    #[derivative(Debug = "ignore")]
+#[derive(Debug)]
+pub struct EncoderCommon<'a, B: rendy_core::hal::Backend, C> {
     raw: &'a mut B::CommandBuffer,
     capability: C,
     family: FamilyId,
@@ -79,7 +77,7 @@ pub struct EncoderCommon<'a, B: gfx_hal::Backend, C> {
 
 impl<'a, B, C> EncoderCommon<'a, B, C>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     /// Bind index buffer.
     /// Last bound index buffer is used in [`draw_indexed`] command.
@@ -87,26 +85,31 @@ where
     /// Note that `draw*` commands available only inside renderpass.
     ///
     /// [`draw_indexed`]: ../struct.RenderPassEncoder.html#method.draw_indexed
-    pub fn bind_index_buffer<'b>(
+    ///
+    /// # Safety
+    ///
+    /// `offset` must not be greater than the size of `buffer`.
+    /// Sum of `offset` and starting address of the `buffer` must be
+    /// multiple of index size indicated by `index_type`.
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdBindIndexBuffer.html
+    pub unsafe fn bind_index_buffer<'b>(
         &mut self,
         buffer: &'b B::Buffer,
         offset: u64,
-        index_type: gfx_hal::IndexType,
+        index_type: rendy_core::hal::IndexType,
     ) where
         C: Supports<Graphics>,
     {
         self.capability.assert();
-
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::bind_index_buffer(
-                self.raw,
-                gfx_hal::buffer::IndexBufferView {
-                    buffer: buffer,
-                    offset,
-                    index_type,
-                },
-            )
-        }
+        rendy_core::hal::command::CommandBuffer::bind_index_buffer(
+            self.raw,
+            rendy_core::hal::buffer::IndexBufferView {
+                buffer: buffer,
+                offset,
+                index_type,
+            },
+        )
     }
 
     /// Bind vertex buffers.
@@ -116,7 +119,14 @@ where
     ///
     /// [`draw`]: ../struct.RenderPassEncoder.html#method.draw
     /// [`draw_indexed`]: ../struct.RenderPassEncoder.html#method.draw_indexed
-    pub fn bind_vertex_buffers<'b>(
+    ///
+    /// # Safety
+    ///
+    /// `first_binding + buffers.into_iter().count()` must less than or equal to the `maxVertexInputBindings`
+    /// device limit.
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdBindVertexBuffers.html
+    pub unsafe fn bind_vertex_buffers<'b>(
         &mut self,
         first_binding: u32,
         buffers: impl IntoIterator<Item = (&'b B::Buffer, u64)>,
@@ -124,14 +134,11 @@ where
         C: Supports<Graphics>,
     {
         self.capability.assert();
-
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::bind_vertex_buffers(
-                self.raw,
-                first_binding,
-                buffers,
-            )
-        }
+        rendy_core::hal::command::CommandBuffer::bind_vertex_buffers(
+            self.raw,
+            first_binding,
+            buffers,
+        )
     }
 
     /// Bind graphics pipeline.
@@ -147,12 +154,16 @@ where
         self.capability.assert();
 
         unsafe {
-            gfx_hal::command::RawCommandBuffer::bind_graphics_pipeline(self.raw, pipeline);
+            rendy_core::hal::command::CommandBuffer::bind_graphics_pipeline(self.raw, pipeline);
         }
     }
 
     /// Bind descriptor sets to graphics pipeline.
-    pub fn bind_graphics_descriptor_sets<'b>(
+    ///
+    /// # Safety
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdBindDescriptorSets.html
+    pub unsafe fn bind_graphics_descriptor_sets<'b>(
         &mut self,
         layout: &B::PipelineLayout,
         first_set: u32,
@@ -163,18 +174,16 @@ where
     {
         self.capability.assert();
 
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::bind_graphics_descriptor_sets(
-                self.raw,
-                layout,
-                first_set as _,
-                sets,
-                offsets,
-            );
-        }
+        rendy_core::hal::command::CommandBuffer::bind_graphics_descriptor_sets(
+            self.raw,
+            layout,
+            first_set as _,
+            sets,
+            offsets,
+        );
     }
 
-    /// Bind graphics pipeline.
+    /// Bind compute pipeline.
     pub fn bind_compute_pipeline(&mut self, pipeline: &B::ComputePipeline)
     where
         C: Supports<Compute>,
@@ -182,12 +191,16 @@ where
         self.capability.assert();
 
         unsafe {
-            gfx_hal::command::RawCommandBuffer::bind_compute_pipeline(self.raw, pipeline);
+            rendy_core::hal::command::CommandBuffer::bind_compute_pipeline(self.raw, pipeline);
         }
     }
 
     /// Bind descriptor sets to compute pipeline.
-    pub fn bind_compute_descriptor_sets<'b>(
+    ///
+    /// # Safety
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdBindDescriptorSets.html
+    pub unsafe fn bind_compute_descriptor_sets<'b>(
         &mut self,
         layout: &B::PipelineLayout,
         first_set: u32,
@@ -198,59 +211,172 @@ where
     {
         self.capability.assert();
 
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::bind_compute_descriptor_sets(
-                self.raw,
-                layout,
-                first_set as usize,
-                sets,
-                offsets,
-            );
-        }
+        rendy_core::hal::command::CommandBuffer::bind_compute_descriptor_sets(
+            self.raw,
+            layout,
+            first_set as usize,
+            sets,
+            offsets,
+        );
     }
 
     /// Insert pipeline barrier.
-    pub fn pipeline_barrier<'b>(
+    ///
+    /// # Safety
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdPipelineBarrier.html
+    pub unsafe fn pipeline_barrier<'b>(
         &mut self,
-        stages: std::ops::Range<gfx_hal::pso::PipelineStage>,
-        dependencies: gfx_hal::memory::Dependencies,
-        barriers: impl IntoIterator<Item = gfx_hal::memory::Barrier<'b, B>>,
+        stages: std::ops::Range<rendy_core::hal::pso::PipelineStage>,
+        dependencies: rendy_core::hal::memory::Dependencies,
+        barriers: impl IntoIterator<Item = rendy_core::hal::memory::Barrier<'b, B>>,
     ) {
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::pipeline_barrier(
-                self.raw,
-                stages,
-                dependencies,
-                barriers,
-            )
-        }
+        rendy_core::hal::command::CommandBuffer::pipeline_barrier(
+            self.raw,
+            stages,
+            dependencies,
+            barriers,
+        )
     }
 
     /// Push graphics constants.
-    pub fn push_constants<'b>(
+    ///
+    /// # Safety
+    ///
+    /// `offset` must be multiple of 4.
+    /// `constants.len() + offset`, must be less than or equal to the
+    /// `maxPushConstantsSize` device limit.
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdPushConstants.html
+    pub unsafe fn push_constants<'b>(
         &mut self,
         layout: &B::PipelineLayout,
-        stages: gfx_hal::pso::ShaderStageFlags,
+        stages: rendy_core::hal::pso::ShaderStageFlags,
         offset: u32,
         constants: &[u32],
     ) {
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::push_graphics_constants(
-                self.raw, layout, stages, offset, constants,
-            );
-        }
+        rendy_core::hal::command::CommandBuffer::push_graphics_constants(
+            self.raw, layout, stages, offset, constants,
+        );
     }
 
-    /// Set scissors
-    pub fn set_scissors<'b>(
+    /// Set viewports
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetViewport.html
+    pub unsafe fn set_viewports<'b>(
         &mut self,
-        first_scissor: u32,
-        rects: impl IntoIterator<Item = &'b gfx_hal::pso::Rect>,
+        first_viewport: u32,
+        viewports: impl IntoIterator<Item = &'b rendy_core::hal::pso::Viewport>,
     ) where
         C: Supports<Graphics>,
     {
         self.capability.assert();
-        unsafe { gfx_hal::command::RawCommandBuffer::set_scissors(self.raw, first_scissor, rects) }
+        rendy_core::hal::command::CommandBuffer::set_viewports(self.raw, first_viewport, viewports)
+    }
+
+    /// Set scissors
+    ///
+    /// # Safety
+    ///
+    /// `first_scissor + rects.count()` must be less than the
+    /// `maxViewports` device limit.
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetScissor.html
+    pub unsafe fn set_scissors<'b>(
+        &mut self,
+        first_scissor: u32,
+        rects: impl IntoIterator<Item = &'b rendy_core::hal::pso::Rect>,
+    ) where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        rendy_core::hal::command::CommandBuffer::set_scissors(self.raw, first_scissor, rects)
+    }
+
+    /// Set the stencil reference dynamic state
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetStencilReference.html
+    pub unsafe fn set_stencil_reference(
+        &mut self,
+        faces: rendy_core::hal::pso::Face,
+        value: rendy_core::hal::pso::StencilValue,
+    ) where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        rendy_core::hal::command::CommandBuffer::set_stencil_reference(self.raw, faces, value);
+    }
+
+    /// Set the stencil compare mask dynamic state
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetStencilCompareMask.html
+    pub unsafe fn set_stencil_read_mask(
+        &mut self,
+        faces: rendy_core::hal::pso::Face,
+        value: rendy_core::hal::pso::StencilValue,
+    ) where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        rendy_core::hal::command::CommandBuffer::set_stencil_read_mask(self.raw, faces, value);
+    }
+
+    /// Set the stencil write mask dynamic state
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetStencilWriteMask.html
+    pub unsafe fn set_stencil_write_mask(
+        &mut self,
+        faces: rendy_core::hal::pso::Face,
+        value: rendy_core::hal::pso::StencilValue,
+    ) where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        rendy_core::hal::command::CommandBuffer::set_stencil_write_mask(self.raw, faces, value);
+    }
+
+    /// Set the values of blend constants
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetBlendConstants.html
+    pub unsafe fn set_blend_constants(&mut self, color: rendy_core::hal::pso::ColorValue)
+    where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        rendy_core::hal::command::CommandBuffer::set_blend_constants(self.raw, color);
+    }
+
+    /// Set the depth bounds test values
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetDepthBounds.html
+    pub unsafe fn set_depth_bounds(&mut self, bounds: std::ops::Range<f32>)
+    where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        rendy_core::hal::command::CommandBuffer::set_depth_bounds(self.raw, bounds);
+    }
+
+    /// Set the dynamic line width state
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetLineWidth.html
+    pub unsafe fn set_line_width(&mut self, width: f32)
+    where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        rendy_core::hal::command::CommandBuffer::set_line_width(self.raw, width);
+    }
+
+    /// Set the depth bias dynamic state
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdSetDepthBias.html
+    pub unsafe fn set_depth_bias(&mut self, depth_bias: rendy_core::hal::pso::DepthBias)
+    where
+        C: Supports<Graphics>,
+    {
+        self.capability.assert();
+        rendy_core::hal::command::CommandBuffer::set_depth_bias(self.raw, depth_bias);
     }
 
     /// Reborrow encoder.
@@ -268,13 +394,13 @@ where
 
 /// Special encoder to record render-pass commands.
 #[derive(Debug)]
-pub struct RenderPassEncoder<'a, B: gfx_hal::Backend> {
+pub struct RenderPassEncoder<'a, B: rendy_core::hal::Backend> {
     inner: EncoderCommon<'a, B, Graphics>,
 }
 
 impl<'a, B> std::ops::Deref for RenderPassEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     type Target = EncoderCommon<'a, B, Graphics>;
 
@@ -285,7 +411,7 @@ where
 
 impl<'a, B> std::ops::DerefMut for RenderPassEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     fn deref_mut(&mut self) -> &mut EncoderCommon<'a, B, Graphics> {
         &mut self.inner
@@ -294,28 +420,55 @@ where
 
 impl<'a, B> RenderPassEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
-    /// Draw.
-    pub fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
-        unsafe { gfx_hal::command::RawCommandBuffer::draw(self.inner.raw, vertices, instances) }
+    /// Clear regions within bound framebuffer attachments
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdClearAttachments.html#vkCmdBeginRenderPass
+    pub unsafe fn clear_attachments(
+        &mut self,
+        clears: impl IntoIterator<
+            Item = impl std::borrow::Borrow<rendy_core::hal::command::AttachmentClear>,
+        >,
+        rects: impl IntoIterator<Item = impl std::borrow::Borrow<rendy_core::hal::pso::ClearRect>>,
+    ) {
+        rendy_core::hal::command::CommandBuffer::clear_attachments(self.inner.raw, clears, rects);
     }
 
-    /// Draw indexed.
-    pub fn draw_indexed(
+    /// Draw.
+    ///
+    /// # Safety
+    ///
+    /// The range of `vertices` must not exceed the size of the currently bound vertex buffer,
+    /// and the range of `instances` must not exceed the size of the currently bound instance
+    /// buffer.
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdDraw.html
+    pub unsafe fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
+        rendy_core::hal::command::CommandBuffer::draw(self.inner.raw, vertices, instances)
+    }
+
+    /// Draw indexed, with `base_vertex` specifying an offset that is treated as
+    /// vertex number 0.
+    ///
+    /// # Safety
+    ///
+    /// Same as `draw()`, plus the value of `base_vertex`.  So, `base_vertex + indices.end`
+    /// must not be larger than the currently bound vertex buffer.
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdDrawIndexed.html
+    pub unsafe fn draw_indexed(
         &mut self,
         indices: std::ops::Range<u32>,
         base_vertex: i32,
         instances: std::ops::Range<u32>,
     ) {
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::draw_indexed(
-                self.inner.raw,
-                indices,
-                base_vertex,
-                instances,
-            )
-        }
+        rendy_core::hal::command::CommandBuffer::draw_indexed(
+            self.inner.raw,
+            indices,
+            base_vertex,
+            instances,
+        )
     }
 
     /// Draw indirect.
@@ -324,16 +477,26 @@ where
     ///
     /// [`draw`]: trait.RenderPassInlineEncoder.html#tymethod.draw
     /// [`DrawCommand`]: struct.DrawCommand.html
-    pub fn draw_indirect(&mut self, buffer: &B::Buffer, offset: u64, draw_count: u32, stride: u32) {
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::draw_indirect(
-                self.inner.raw,
-                buffer,
-                offset,
-                draw_count,
-                stride,
-            )
-        }
+    ///
+    /// # Safety
+    ///
+    /// Similar to `draw()`.
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdDrawIndirect.html
+    pub unsafe fn draw_indirect(
+        &mut self,
+        buffer: &B::Buffer,
+        offset: u64,
+        draw_count: u32,
+        stride: u32,
+    ) {
+        rendy_core::hal::command::CommandBuffer::draw_indirect(
+            self.inner.raw,
+            buffer,
+            offset,
+            draw_count,
+            stride,
+        )
     }
 
     /// Draw indirect with indices.
@@ -342,22 +505,26 @@ where
     ///
     /// [`draw`]: trait.RenderPassInlineEncoder.html#tymethod.draw_indexed
     /// [`DrawIndexedCommand`]: struct.DrawIndexedCommand.html
-    pub fn draw_indexed_indirect(
+    ///
+    /// # Safety
+    ///
+    /// Similar to `draw_indexed()`
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdDrawIndexedIndirect.html
+    pub unsafe fn draw_indexed_indirect(
         &mut self,
         buffer: &B::Buffer,
         offset: u64,
         draw_count: u32,
         stride: u32,
     ) {
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::draw_indexed_indirect(
-                self.inner.raw,
-                buffer,
-                offset,
-                draw_count,
-                stride,
-            )
-        }
+        rendy_core::hal::command::CommandBuffer::draw_indexed_indirect(
+            self.inner.raw,
+            buffer,
+            offset,
+            draw_count,
+            stride,
+        )
     }
 
     /// Reborrow encoder.
@@ -370,22 +537,22 @@ where
 
 /// Special encoder to record commands inside render pass.
 #[derive(Debug)]
-pub struct RenderPassInlineEncoder<'a, B: gfx_hal::Backend> {
+pub struct RenderPassInlineEncoder<'a, B: rendy_core::hal::Backend> {
     inner: RenderPassEncoder<'a, B>,
 }
 
 impl<'a, B> Drop for RenderPassInlineEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     fn drop(&mut self) {
-        unsafe { gfx_hal::command::RawCommandBuffer::end_render_pass(self.inner.inner.raw) }
+        unsafe { rendy_core::hal::command::CommandBuffer::end_render_pass(self.inner.inner.raw) }
     }
 }
 
 impl<'a, B> std::ops::Deref for RenderPassInlineEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     type Target = RenderPassEncoder<'a, B>;
 
@@ -396,7 +563,7 @@ where
 
 impl<'a, B> std::ops::DerefMut for RenderPassInlineEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     fn deref_mut(&mut self) -> &mut RenderPassEncoder<'a, B> {
         &mut self.inner
@@ -405,14 +572,14 @@ where
 
 impl<'a, B> RenderPassInlineEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     /// Record next subpass inline.
     pub fn next_subpass_inline(self) -> RenderPassInlineEncoder<'a, B> {
         unsafe {
-            gfx_hal::command::RawCommandBuffer::next_subpass(
+            rendy_core::hal::command::CommandBuffer::next_subpass(
                 self.inner.inner.raw,
-                gfx_hal::command::SubpassContents::Inline,
+                rendy_core::hal::command::SubpassContents::Inline,
             );
         }
 
@@ -422,9 +589,9 @@ where
     /// Record next subpass secondary.
     pub fn next_subpass_secondary(self) -> RenderPassSecondaryEncoder<'a, B> {
         unsafe {
-            gfx_hal::command::RawCommandBuffer::next_subpass(
+            rendy_core::hal::command::CommandBuffer::next_subpass(
                 self.inner.inner.raw,
-                gfx_hal::command::SubpassContents::SecondaryBuffers,
+                rendy_core::hal::command::SubpassContents::SecondaryBuffers,
             );
         }
 
@@ -441,22 +608,22 @@ where
 
 /// Special encoder to execute secondary buffers inside render pass.
 #[derive(Debug)]
-pub struct RenderPassSecondaryEncoder<'a, B: gfx_hal::Backend> {
+pub struct RenderPassSecondaryEncoder<'a, B: rendy_core::hal::Backend> {
     inner: EncoderCommon<'a, B, Graphics>,
 }
 
 impl<'a, B> Drop for RenderPassSecondaryEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     fn drop(&mut self) {
-        unsafe { gfx_hal::command::RawCommandBuffer::end_render_pass(self.inner.raw) }
+        unsafe { rendy_core::hal::command::CommandBuffer::end_render_pass(self.inner.raw) }
     }
 }
 
 impl<'a, B> RenderPassSecondaryEncoder<'a, B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     /// Execute commands from secondary buffers.
     pub fn execute_commands(
@@ -465,7 +632,7 @@ where
     ) {
         let family = self.inner.family;
         unsafe {
-            gfx_hal::command::RawCommandBuffer::execute_commands(
+            rendy_core::hal::command::CommandBuffer::execute_commands(
                 self.inner.raw,
                 submittables.into_iter().map(|submit| {
                     assert_eq!(family, submit.family());
@@ -478,13 +645,11 @@ where
     /// Record next subpass inline.
     pub fn next_subpass_inline(self) -> RenderPassInlineEncoder<'a, B> {
         unsafe {
-            gfx_hal::command::RawCommandBuffer::next_subpass(
+            rendy_core::hal::command::CommandBuffer::next_subpass(
                 self.inner.raw,
-                gfx_hal::command::SubpassContents::Inline,
+                rendy_core::hal::command::SubpassContents::Inline,
             );
-        }
 
-        unsafe {
             let next = RenderPassInlineEncoder {
                 inner: RenderPassEncoder {
                     inner: std::ptr::read(&self.inner),
@@ -499,9 +664,9 @@ where
     /// Record next subpass secondary.
     pub fn next_subpass_secondary(self) -> RenderPassSecondaryEncoder<'a, B> {
         unsafe {
-            gfx_hal::command::RawCommandBuffer::next_subpass(
+            rendy_core::hal::command::CommandBuffer::next_subpass(
                 self.inner.raw,
-                gfx_hal::command::SubpassContents::SecondaryBuffers,
+                rendy_core::hal::command::SubpassContents::SecondaryBuffers,
             );
         }
 
@@ -511,14 +676,14 @@ where
 
 /// Trait to encode commands outside render pass.
 #[derive(Debug)]
-pub struct Encoder<'a, B: gfx_hal::Backend, C, L> {
+pub struct Encoder<'a, B: rendy_core::hal::Backend, C, L> {
     inner: EncoderCommon<'a, B, C>,
     level: L,
 }
 
 impl<'a, B, C, L> std::ops::Deref for Encoder<'a, B, C, L>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     type Target = EncoderCommon<'a, B, C>;
 
@@ -529,7 +694,7 @@ where
 
 impl<'a, B, C, L> std::ops::DerefMut for Encoder<'a, B, C, L>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     fn deref_mut(&mut self) -> &mut EncoderCommon<'a, B, C> {
         &mut self.inner
@@ -538,15 +703,15 @@ where
 
 impl<'a, B, C> Encoder<'a, B, C, PrimaryLevel>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     /// Beging recording render pass inline.
     pub fn begin_render_pass_inline(
         &mut self,
         render_pass: &B::RenderPass,
         framebuffer: &B::Framebuffer,
-        render_area: gfx_hal::pso::Rect,
-        clear_values: &[gfx_hal::command::ClearValueRaw],
+        render_area: rendy_core::hal::pso::Rect,
+        clear_values: &[rendy_core::hal::command::ClearValue],
     ) -> RenderPassInlineEncoder<'_, B>
     where
         C: Supports<Graphics>,
@@ -554,13 +719,13 @@ where
         self.capability.assert();
 
         unsafe {
-            gfx_hal::command::RawCommandBuffer::begin_render_pass(
+            rendy_core::hal::command::CommandBuffer::begin_render_pass(
                 self.inner.raw,
                 render_pass,
                 framebuffer,
                 render_area,
                 clear_values,
-                gfx_hal::command::SubpassContents::Inline,
+                rendy_core::hal::command::SubpassContents::Inline,
             )
         }
 
@@ -576,8 +741,8 @@ where
         &mut self,
         render_pass: &B::RenderPass,
         framebuffer: &B::Framebuffer,
-        render_area: gfx_hal::pso::Rect,
-        clear_values: &[gfx_hal::command::ClearValueRaw],
+        render_area: rendy_core::hal::pso::Rect,
+        clear_values: &[rendy_core::hal::command::ClearValue],
     ) -> RenderPassSecondaryEncoder<'_, B>
     where
         C: Supports<Graphics>,
@@ -585,13 +750,13 @@ where
         self.capability.assert();
 
         unsafe {
-            gfx_hal::command::RawCommandBuffer::begin_render_pass(
+            rendy_core::hal::command::CommandBuffer::begin_render_pass(
                 self.inner.raw,
                 render_pass,
                 framebuffer,
                 render_area,
                 clear_values,
-                gfx_hal::command::SubpassContents::SecondaryBuffers,
+                rendy_core::hal::command::SubpassContents::SecondaryBuffers,
             )
         }
 
@@ -607,7 +772,7 @@ where
     ) {
         let family = self.inner.family;
         unsafe {
-            gfx_hal::command::RawCommandBuffer::execute_commands(
+            rendy_core::hal::command::CommandBuffer::execute_commands(
                 self.inner.raw,
                 submittables.into_iter().map(|submit| {
                     assert_eq!(family, submit.family());
@@ -620,7 +785,7 @@ where
 
 impl<'a, B, C, L> Encoder<'a, B, C, L>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     /// Get encoder level.
     pub fn level(&self) -> L
@@ -634,104 +799,152 @@ where
     /// `src` and `dst` can be the same buffer or alias in memory.
     /// But regions must not overlap.
     /// Otherwise resulting values are undefined.
-    pub fn copy_buffer(
+    ///
+    /// # Safety
+    ///
+    /// The size of the copy region in any `regions` must not exceed the
+    /// length of the corresponding buffer.
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdCopyBuffer.html
+    pub unsafe fn copy_buffer(
         &mut self,
         src: &B::Buffer,
         dst: &B::Buffer,
-        regions: impl IntoIterator<Item = gfx_hal::command::BufferCopy>,
+        regions: impl IntoIterator<Item = rendy_core::hal::command::BufferCopy>,
     ) where
         C: Supports<Transfer>,
     {
         self.capability.assert();
 
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::copy_buffer(self.inner.raw, src, dst, regions)
-        }
+        rendy_core::hal::command::CommandBuffer::copy_buffer(self.inner.raw, src, dst, regions)
     }
 
     /// Copy buffer region to image subresource range.
-    pub fn copy_buffer_to_image(
+    ///
+    /// # Safety
+    ///
+    /// Same as `copy_buffer()`
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdCopyBufferToImage.html
+    pub unsafe fn copy_buffer_to_image(
         &mut self,
         src: &B::Buffer,
         dst: &B::Image,
-        dst_layout: gfx_hal::image::Layout,
-        regions: impl IntoIterator<Item = gfx_hal::command::BufferImageCopy>,
+        dst_layout: rendy_core::hal::image::Layout,
+        regions: impl IntoIterator<Item = rendy_core::hal::command::BufferImageCopy>,
     ) where
         C: Supports<Transfer>,
     {
         self.capability.assert();
 
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::copy_buffer_to_image(
-                self.inner.raw,
-                src,
-                dst,
-                dst_layout,
-                regions,
-            )
-        }
+        rendy_core::hal::command::CommandBuffer::copy_buffer_to_image(
+            self.inner.raw,
+            src,
+            dst,
+            dst_layout,
+            regions,
+        )
     }
 
     /// Copy image regions.
-    pub fn copy_image(
+    ///
+    /// # Safety
+    ///
+    /// Same as `copy_buffer()`
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdCopyImage.html
+    pub unsafe fn copy_image(
         &mut self,
         src: &B::Image,
-        src_layout: gfx_hal::image::Layout,
+        src_layout: rendy_core::hal::image::Layout,
         dst: &B::Image,
-        dst_layout: gfx_hal::image::Layout,
-        regions: impl IntoIterator<Item = gfx_hal::command::ImageCopy>,
+        dst_layout: rendy_core::hal::image::Layout,
+        regions: impl IntoIterator<Item = rendy_core::hal::command::ImageCopy>,
     ) where
         C: Supports<Transfer>,
     {
         self.capability.assert();
 
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::copy_image(
-                self.inner.raw,
-                src,
-                src_layout,
-                dst,
-                dst_layout,
-                regions,
-            )
-        }
+        rendy_core::hal::command::CommandBuffer::copy_image(
+            self.inner.raw,
+            src,
+            src_layout,
+            dst,
+            dst_layout,
+            regions,
+        )
+    }
+
+    /// Copy image subresource range to buffer region.
+    ///
+    /// # Safety
+    ///
+    /// Same as `copy_buffer()`
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdCopyImageToBuffer.html
+    pub unsafe fn copy_image_to_buffer(
+        &mut self,
+        src: &B::Image,
+        src_layout: rendy_core::hal::image::Layout,
+        dst: &B::Buffer,
+        regions: impl IntoIterator<Item = rendy_core::hal::command::BufferImageCopy>,
+    ) where
+        C: Supports<Transfer>,
+    {
+        self.capability.assert();
+
+        rendy_core::hal::command::CommandBuffer::copy_image_to_buffer(
+            self.inner.raw,
+            src,
+            src_layout,
+            dst,
+            regions,
+        )
     }
 
     /// Blit image regions, potentially using specified filter when resize is necessary.
-    pub fn blit_image(
+    ///
+    /// # Safety
+    ///
+    /// Same as `copy_buffer()`
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdBlitImage.html
+    pub unsafe fn blit_image(
         &mut self,
         src: &B::Image,
-        src_layout: gfx_hal::image::Layout,
+        src_layout: rendy_core::hal::image::Layout,
         dst: &B::Image,
-        dst_layout: gfx_hal::image::Layout,
-        filter: gfx_hal::image::Filter,
-        regions: impl IntoIterator<Item = gfx_hal::command::ImageBlit>,
+        dst_layout: rendy_core::hal::image::Layout,
+        filter: rendy_core::hal::image::Filter,
+        regions: impl IntoIterator<Item = rendy_core::hal::command::ImageBlit>,
     ) where
         C: Supports<Graphics>,
     {
         self.capability.assert();
 
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::blit_image(
-                self.inner.raw,
-                src,
-                src_layout,
-                dst,
-                dst_layout,
-                filter,
-                regions,
-            )
-        }
+        rendy_core::hal::command::CommandBuffer::blit_image(
+            self.inner.raw,
+            src,
+            src_layout,
+            dst,
+            dst_layout,
+            filter,
+            regions,
+        )
     }
 
     /// Dispatch compute.
-    pub fn dispatch(&mut self, x: u32, y: u32, z: u32)
+    ///
+    /// # Safety
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdDispatch.html
+    pub unsafe fn dispatch(&mut self, x: u32, y: u32, z: u32)
     where
         C: Supports<Compute>,
     {
         self.capability.assert();
 
-        unsafe { gfx_hal::command::RawCommandBuffer::dispatch(self.inner.raw, [x, y, z]) }
+        rendy_core::hal::command::CommandBuffer::dispatch(self.inner.raw, [x, y, z])
     }
 
     /// Dispatch indirect.
@@ -740,21 +953,23 @@ where
     ///
     /// [`dispatch`]: trait.Encoder.html#tymethod.dispatch
     /// [`DispatchCommand`]: struct.DispatchCommand.html
-    pub fn dispatch_indirect(&mut self, buffer: &B::Buffer, offset: u64)
+    ///
+    /// # Safety
+    ///
+    /// See: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/man/html/vkCmdDispatchIndirect.html
+    pub unsafe fn dispatch_indirect(&mut self, buffer: &B::Buffer, offset: u64)
     where
         C: Supports<Compute>,
     {
         self.capability.assert();
 
-        unsafe {
-            gfx_hal::command::RawCommandBuffer::dispatch_indirect(self.inner.raw, buffer, offset)
-        }
+        rendy_core::hal::command::CommandBuffer::dispatch_indirect(self.inner.raw, buffer, offset)
     }
 }
 
 impl<B, C, U, L, R> CommandBuffer<B, C, RecordingState<U>, L, R>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
     C: Capability,
     L: Level,
 {
@@ -773,7 +988,7 @@ where
 
 impl<B, C, U, R> CommandBuffer<B, C, RecordingState<U, RenderPassContinue>, SecondaryLevel, R>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
     C: Supports<Graphics>,
 {
     /// Get encoder that will encode render-pass commands into this command buffer.

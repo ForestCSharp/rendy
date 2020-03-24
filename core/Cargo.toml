@@ -1,0 +1,46 @@
+[package]
+name = "rendy-core"
+version = "0.5.1"
+authors = ["omni-viral <scareaangel@gmail.com>"]
+edition = "2018"
+repository = "https://github.com/amethyst/rendy"
+license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/rendy-core"
+keywords = ["graphics", "gfx-hal", "rendy"]
+categories = ["rendering"]
+description = "Rendy's utilities"
+
+[features]
+serde-1 = ["serde", "gfx-hal/serde"]
+
+# This list of features is common for many of rendy's crates
+# All other crates should transitively enable feature for rendy-core crate
+# and not rely on the feature being enabled for that crate directly.
+# To conditionally enable token trees `rendy-core::with_*` macro should be used instead of
+# `cfg` attributes.
+empty = ["gfx-backend-empty"]
+dx12 = ["gfx-backend-dx12"]
+metal = ["gfx-backend-metal"]
+gl = ["gfx-backend-gl"]
+vulkan = ["gfx-backend-vulkan"]
+no-slow-safety-checks = []
+
+[dependencies]
+gfx-hal = { git = "https://github.com/gfx-rs/gfx", rev = "3641183231f16877d4ea2fbdb2ff208ce736d6c4" }
+gfx-backend-empty = { git = "https://github.com/gfx-rs/gfx", rev = "3641183231f16877d4ea2fbdb2ff208ce736d6c4", optional = true }
+gfx-backend-gl = { git = "https://github.com/gfx-rs/gfx", rev = "3641183231f16877d4ea2fbdb2ff208ce736d6c4", features = ["glutin"], optional = true }
+lazy_static = "1.0"
+log = "0.4"
+parking_lot = "0.9"
+serde = { version = "1.0", optional = true, features = ["derive"] }
+thread_profiler = "0.3"
+raw-window-handle = "0.3"
+
+[target.'cfg(all(target_os = "windows", not(target_arch = "wasm32")))'.dependencies]
+gfx-backend-dx12 = { git = "https://github.com/gfx-rs/gfx", rev = "3641183231f16877d4ea2fbdb2ff208ce736d6c4", optional = true }
+
+[target.'cfg(any(all(not(target_arch = "wasm32"), target_os = "macos"), all(target_arch = "aarch64", target_os = "ios")))'.dependencies]
+gfx-backend-metal = { git = "https://github.com/gfx-rs/gfx", rev = "3641183231f16877d4ea2fbdb2ff208ce736d6c4", optional = true }
+
+[target.'cfg(all(any(target_os = "windows", all(unix, not(any(target_os = "macos", target_os = "ios")))), not(target_arch = "wasm32")))'.dependencies]
+gfx-backend-vulkan = { git = "https://github.com/gfx-rs/gfx", rev = "3641183231f16877d4ea2fbdb2ff208ce736d6c4", features = ["x11"], optional = true }

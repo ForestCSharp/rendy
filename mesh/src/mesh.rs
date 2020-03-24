@@ -4,13 +4,13 @@
 
 use crate::{
     command::{EncoderCommon, Graphics, QueueId, RenderPassEncoder, Supports},
-    factory::{BufferState, Factory},
+    core::cast_cow,
+    factory::{BufferState, Factory, UploadError},
     memory::{Data, Upload, Write},
     resource::{Buffer, BufferInfo, Escape},
-    util::cast_cow,
     AsVertex, VertexFormat,
 };
-use gfx_hal::adapter::PhysicalDevice;
+use rendy_core::hal::adapter::PhysicalDevice;
 use std::{borrow::Cow, mem::size_of};
 
 /// Vertex buffer with it's format
@@ -22,9 +22,9 @@ pub struct VertexBufferLayout {
 
 /// Index buffer with it's type
 #[derive(Debug)]
-pub struct IndexBuffer<B: gfx_hal::Backend> {
+pub struct IndexBuffer<B: rendy_core::hal::Backend> {
     buffer: Escape<Buffer<B>>,
-    index_type: gfx_hal::IndexType,
+    index_type: rendy_core::hal::IndexType,
 }
 
 /// Abstracts over two types of indices and their absence.
@@ -84,7 +84,7 @@ pub struct MeshBuilder<'a> {
     vertices: smallvec::SmallVec<[RawVertices<'a>; 16]>,
     #[cfg_attr(feature = "serde", serde(borrow))]
     indices: Option<RawIndices<'a>>,
-    prim: gfx_hal::Primitive,
+    prim: rendy_core::hal::pso::Primitive,
 }
 
 #[derive(Clone, Debug)]
@@ -100,13 +100,13 @@ struct RawVertices<'a> {
 struct RawIndices<'a> {
     #[cfg_attr(feature = "serde", serde(with = "serde_bytes", borrow))]
     indices: Cow<'a, [u8]>,
-    index_type: gfx_hal::IndexType,
+    index_type: rendy_core::hal::IndexType,
 }
 
-fn index_stride(index_type: gfx_hal::IndexType) -> usize {
+fn index_stride(index_type: rendy_core::hal::IndexType) -> usize {
     match index_type {
-        gfx_hal::IndexType::U16 => size_of::<u16>(),
-        gfx_hal::IndexType::U32 => size_of::<u32>(),
+        rendy_core::hal::IndexType::U16 => size_of::<u16>(),
+        rendy_core::hal::IndexType::U32 => size_of::<u32>(),
     }
 }
 
@@ -116,7 +116,7 @@ impl<'a> MeshBuilder<'a> {
         MeshBuilder {
             vertices: smallvec::SmallVec::new(),
             indices: None,
-            prim: gfx_hal::Primitive::TriangleList,
+            prim: rendy_core::hal::pso::Primitive::TriangleList,
         }
     }
 
@@ -158,11 +158,11 @@ impl<'a> MeshBuilder<'a> {
             Indices::None => None,
             Indices::U16(i) => Some(RawIndices {
                 indices: cast_cow(i),
-                index_type: gfx_hal::IndexType::U16,
+                index_type: rendy_core::hal::IndexType::U16,
             }),
             Indices::U32(i) => Some(RawIndices {
                 indices: cast_cow(i),
-                index_type: gfx_hal::IndexType::U32,
+                index_type: rendy_core::hal::IndexType::U32,
             }),
         };
         self
@@ -194,7 +194,7 @@ impl<'a> MeshBuilder<'a> {
     /// Sets the primitive type of the mesh.
     ///
     /// By default, meshes are constructed as triangle lists.
-    pub fn with_prim_type(mut self, prim: gfx_hal::Primitive) -> Self {
+    pub fn with_prim_type(mut self, prim: rendy_core::hal::pso::Primitive) -> Self {
         self.prim = prim;
         self
     }
@@ -202,7 +202,7 @@ impl<'a> MeshBuilder<'a> {
     /// Sets the primitive type of the mesh.
     ///
     /// By default, meshes are constructed as triangle lists.
-    pub fn set_prim_type(&mut self, prim: gfx_hal::Primitive) -> &mut Self {
+    pub fn set_prim_type(&mut self, prim: rendy_core::hal::pso::Primitive) -> &mut Self {
         self.prim = prim;
         self
     }
@@ -214,9 +214,9 @@ impl<'a> MeshBuilder<'a> {
     /// effectively discaring extra data from larger buffers.
     ///
     /// Note that contents of index buffer is not validated.
-    pub fn build<B>(&self, queue: QueueId, factory: &Factory<B>) -> Result<Mesh<B>, failure::Error>
+    pub fn build<B>(&self, queue: QueueId, factory: &Factory<B>) -> Result<Mesh<B>, UploadError>
     where
-        B: gfx_hal::Backend,
+        B: rendy_core::hal::Backend,
     {
         let align = factory.physical().limits().non_coherent_atom_size;
         let mut len = self
@@ -234,24 +234,32 @@ impl<'a> MeshBuilder<'a> {
 
         let aligned_size = align_by(align, buffer_size) as u64;
 
-        let mut staging = factory.create_buffer(
-            BufferInfo {
-                size: aligned_size,
-                usage: gfx_hal::buffer::Usage::TRANSFER_SRC,
-            },
-            Upload,
-        )?;
+        let mut staging = factory
+            .create_buffer(
+                BufferInfo {
+                    size: aligned_size,
+                    usage: rendy_core::hal::buffer::Usage::TRANSFER_SRC,
+                },
+                Upload,
+            )
+            .map_err(UploadError::Create)?;
 
-        let mut buffer = factory.create_buffer(
-            BufferInfo {
-                size: buffer_size as _,
-                usage: gfx_hal::buffer::Usage::VERTEX | gfx_hal::buffer::Usage::TRANSFER_DST,
-            },
-            Data,
-        )?;
+        let mut buffer = factory
+            .create_buffer(
+                BufferInfo {
+                    size: buffer_size as _,
+                    usage: rendy_core::hal::buffer::Usage::VERTEX
+                        | rendy_core::hal::buffer::Usage::TRANSFER_DST,
+                },
+                Data,
+            )
+            .map_err(UploadError::Create)?;
 
-        let mut mapped = staging.map(factory, 0..aligned_size)?;
-        let mut writer = unsafe { mapped.write(factory, 0..aligned_size)? };
+        let mut mapped = staging
+            .map(factory, 0..aligned_size)
+            .map_err(UploadError::Map)?;
+        let mut writer =
+            unsafe { mapped.write(factory, 0..aligned_size) }.map_err(UploadError::Map)?;
         let staging_slice = unsafe { writer.slice() };
 
         let mut offset = 0usize;
@@ -263,12 +271,12 @@ impl<'a> MeshBuilder<'a> {
                 staging_slice[offset..offset + size].copy_from_slice(&vertices[0..size]);
                 let this_offset = offset as u64;
                 offset += size;
-                Ok(VertexBufferLayout {
+                VertexBufferLayout {
                     offset: this_offset,
                     format: format.clone(),
-                })
+                }
             })
-            .collect::<Result<_, failure::Error>>()?;
+            .collect();
 
         drop(staging_slice);
         drop(writer);
@@ -283,13 +291,16 @@ impl<'a> MeshBuilder<'a> {
                 index_type,
             }) => {
                 len = (indices.len() / index_stride(index_type)) as u32;
-                let mut buffer = factory.create_buffer(
-                    BufferInfo {
-                        size: indices.len() as _,
-                        usage: gfx_hal::buffer::Usage::INDEX | gfx_hal::buffer::Usage::TRANSFER_DST,
-                    },
-                    Data,
-                )?;
+                let mut buffer = factory
+                    .create_buffer(
+                        BufferInfo {
+                            size: indices.len() as _,
+                            usage: rendy_core::hal::buffer::Usage::INDEX
+                                | rendy_core::hal::buffer::Usage::TRANSFER_DST,
+                        },
+                        Data,
+                    )
+                    .map_err(UploadError::Create)?;
                 unsafe {
                     // New buffer can't be touched by device yet.
                     factory.upload_buffer(
@@ -298,8 +309,8 @@ impl<'a> MeshBuilder<'a> {
                         &indices,
                         None,
                         BufferState::new(queue)
-                            .with_access(gfx_hal::buffer::Access::INDEX_BUFFER_READ)
-                            .with_stage(gfx_hal::pso::PipelineStage::VERTEX_INPUT),
+                            .with_access(rendy_core::hal::buffer::Access::INDEX_BUFFER_READ)
+                            .with_stage(rendy_core::hal::pso::PipelineStage::VERTEX_INPUT),
                     )?;
                 }
 
@@ -308,15 +319,17 @@ impl<'a> MeshBuilder<'a> {
         };
 
         unsafe {
-            factory.upload_from_staging_buffer(
-                &mut buffer,
-                0,
-                staging,
-                None,
-                BufferState::new(queue)
-                    .with_access(gfx_hal::buffer::Access::VERTEX_BUFFER_READ)
-                    .with_stage(gfx_hal::pso::PipelineStage::VERTEX_INPUT),
-            )?;
+            factory
+                .upload_from_staging_buffer(
+                    &mut buffer,
+                    0,
+                    staging,
+                    None,
+                    BufferState::new(queue)
+                        .with_access(rendy_core::hal::buffer::Access::VERTEX_BUFFER_READ)
+                        .with_stage(rendy_core::hal::pso::PipelineStage::VERTEX_INPUT),
+                )
+                .map_err(UploadError::Upload)?;
         }
 
         Ok(Mesh {
@@ -336,25 +349,25 @@ fn align_by(align: usize, value: usize) -> usize {
 /// Single mesh is a collection of buffer ranges that provides available attributes.
 /// Usually exactly one mesh is used per draw call.
 #[derive(Debug)]
-pub struct Mesh<B: gfx_hal::Backend> {
+pub struct Mesh<B: rendy_core::hal::Backend> {
     vertex_buffer: Escape<Buffer<B>>,
     vertex_layouts: Vec<VertexBufferLayout>,
     index_buffer: Option<IndexBuffer<B>>,
-    prim: gfx_hal::Primitive,
+    prim: rendy_core::hal::pso::Primitive,
     len: u32,
 }
 
 impl<B> Mesh<B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     /// Build new mesh with `MeshBuilder`
     pub fn builder<'a>() -> MeshBuilder<'a> {
         MeshBuilder::new()
     }
 
-    /// gfx_hal::Primitive type of the `Mesh`
-    pub fn primitive(&self) -> gfx_hal::Primitive {
+    /// rendy_core::hal::pso::Primitive type of the `Mesh`
+    pub fn primitive(&self) -> rendy_core::hal::pso::Primitive {
         self.prim
     }
 
@@ -410,13 +423,13 @@ where
     {
         let vertex_iter = self.get_vertex_iter(formats)?;
         match self.index_buffer.as_ref() {
-            Some(index_buffer) => {
+            Some(index_buffer) => unsafe {
                 encoder.bind_index_buffer(index_buffer.buffer.raw(), 0, index_buffer.index_type);
                 encoder.bind_vertex_buffers(first_binding, vertex_iter);
-            }
-            None => {
+            },
+            None => unsafe {
                 encoder.bind_vertex_buffers(first_binding, vertex_iter);
-            }
+            },
         }
 
         Ok(self.len)
@@ -431,15 +444,21 @@ where
         encoder: &mut RenderPassEncoder<'_, B>,
     ) -> Result<u32, Incompatible> {
         let vertex_iter = self.get_vertex_iter(formats)?;
-        match self.index_buffer.as_ref() {
-            Some(index_buffer) => {
-                encoder.bind_index_buffer(index_buffer.buffer.raw(), 0, index_buffer.index_type);
-                encoder.bind_vertex_buffers(first_binding, vertex_iter);
-                encoder.draw_indexed(0..self.len, 0, instance_range);
-            }
-            None => {
-                encoder.bind_vertex_buffers(first_binding, vertex_iter);
-                encoder.draw(0..self.len, instance_range);
+        unsafe {
+            match self.index_buffer.as_ref() {
+                Some(index_buffer) => {
+                    encoder.bind_index_buffer(
+                        index_buffer.buffer.raw(),
+                        0,
+                        index_buffer.index_type,
+                    );
+                    encoder.bind_vertex_buffers(first_binding, vertex_iter);
+                    encoder.draw_indexed(0..self.len, 0, instance_range);
+                }
+                None => {
+                    encoder.bind_vertex_buffers(first_binding, vertex_iter);
+                    encoder.draw(0..self.len, instance_range);
+                }
             }
         }
 
@@ -447,16 +466,25 @@ where
     }
 }
 
-/// failure::Error type returned by `Mesh::bind` in case of mesh's vertex buffers are incompatible with requested vertex formats.
-#[derive(failure::Fail, Clone, Debug)]
-#[fail(
-    display = "Vertex format {:?} is not compatible with any of {:?}.",
-    not_found, in_formats
-)]
+/// Error type returned by `Mesh::bind` in case of mesh's vertex buffers are incompatible with requested vertex formats.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Incompatible {
-    not_found: VertexFormat,
-    in_formats: Vec<VertexFormat>,
+    /// Format that was queried but was not found
+    pub not_found: VertexFormat,
+    /// List of formats that were available at query time
+    pub in_formats: Vec<VertexFormat>,
 }
+
+impl std::fmt::Display for Incompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Vertex format {:?} is not compatible with any of {:?}.",
+            self.not_found, self.in_formats
+        )
+    }
+}
+impl std::error::Error for Incompatible {}
 
 /// Helper function to find buffer with compatible format.
 fn find_compatible_buffer(

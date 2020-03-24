@@ -1,9 +1,9 @@
 use {
     crate::ranges::*,
     gfx_hal::{
-        device::OutOfMemory,
+        device::{Device, OutOfMemory},
         pso::{AllocationError, DescriptorPool as _, DescriptorPoolCreateFlags},
-        Backend, Device,
+        Backend,
     },
     smallvec::{smallvec, SmallVec},
     std::{
@@ -52,14 +52,12 @@ where
 
 #[derive(Debug)]
 struct Allocation<B: Backend> {
-    sets: Vec<B::DescriptorSet>,
+    sets: SmallVec<[B::DescriptorSet; 1]>,
     pools: Vec<u64>,
 }
 
-#[derive(derivative::Derivative)]
-#[derivative(Debug)]
+#[derive(Debug)]
 struct DescriptorPool<B: Backend> {
-    #[derivative(Debug = "ignore")]
     raw: B::DescriptorPool,
     size: u32,
 
@@ -74,13 +72,13 @@ unsafe fn allocate_from_pool<B: Backend>(
     raw: &mut B::DescriptorPool,
     layout: &B::DescriptorSetLayout,
     count: u32,
-    allocation: &mut Vec<B::DescriptorSet>,
+    allocation: &mut SmallVec<[B::DescriptorSet; 1]>,
 ) -> Result<(), OutOfMemory> {
     let sets_were = allocation.len();
     raw.allocate_sets(std::iter::repeat(layout).take(count as usize), allocation)
         .map_err(|err| match err {
-            AllocationError::OutOfHostMemory => OutOfMemory::OutOfHostMemory,
-            AllocationError::OutOfDeviceMemory => OutOfMemory::OutOfDeviceMemory,
+            AllocationError::Host => OutOfMemory::Host,
+            AllocationError::Device => OutOfMemory::Device,
             err => {
                 // We check pool for free descriptors and sets before calling this function,
                 // so it can't be exhausted.
@@ -259,7 +257,7 @@ where
         DescriptorAllocator {
             buckets: HashMap::new(),
             allocation: Allocation {
-                sets: Vec::new(),
+                sets: SmallVec::new(),
                 pools: Vec::new(),
             },
             relevant: relevant::Relevant,
@@ -349,7 +347,7 @@ where
     ///
     /// # Safety
     ///
-    /// None of descriptor sets can be refernced in any pending command buffers.
+    /// None of descriptor sets can be referenced in any pending command buffers.
     /// All command buffers where at least one of descriptor sets referenced
     /// move to invalid state.
     pub unsafe fn free(&mut self, all_sets: impl IntoIterator<Item = DescriptorSet<B>>) {
@@ -371,7 +369,7 @@ where
                         .expect("Set should be allocated from this allocator");
                     debug_assert!(bucket.total >= raw_sets.len() as u64);
 
-                    bucket.free(raw_sets.drain(), *pool);
+                    bucket.free(raw_sets.drain(..), *pool);
                     *pool = set.pool;
                     *ranges = set.ranges;
                     raw_sets.push(set.raw);

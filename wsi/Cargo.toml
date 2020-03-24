@@ -1,6 +1,6 @@
 [package]
 name = "rendy-wsi"
-version = "0.2.0"
+version = "0.5.1"
 authors = ["omni-viral <scareaangel@gmail.com>"]
 edition = "2018"
 repository = "https://github.com/amethyst/rendy"
@@ -11,21 +11,18 @@ categories = ["rendering"]
 description = "Rendy's windowing support"
 
 [features]
-empty = ["rendy-util/empty"]
-dx12 = ["rendy-util/dx12"]
-metal = ["rendy-util/metal"]
-vulkan = ["rendy-util/vulkan"]
-no-slow-safety-checks = ["rendy-util/no-slow-safety-checks"]
+empty = ["rendy-core/empty"]
+dx12 = ["rendy-core/dx12"]
+gl = ["rendy-core/gl"]
+metal = ["rendy-core/metal"]
+vulkan = ["rendy-core/vulkan"]
+no-slow-safety-checks = ["rendy-core/no-slow-safety-checks"]
 
 [dependencies]
-rendy-memory = { version = "0.2.0", path = "../memory" }
-rendy-resource = { version = "0.2.0", path = "../resource" }
-rendy-util = { version = "0.2.0", path = "../util" }
+rendy-memory = { version = "0.5.2", path = "../memory" }
+rendy-resource = { version = "0.5.1", path = "../resource" }
+rendy-core = { version = "0.5.1", path = "../core" }
 
-gfx-hal = "0.2"
-derivative = "1.0"
-failure = "0.1"
 log = "0.4"
-relevant = { version = "0.4", features = ["log", "backtrace"] }
-smallvec = "0.6"
-winit = { version = "0.19", optional = true }
+relevant = { version = "0.4", features = ["log"] }
+smallvec = "1.0"

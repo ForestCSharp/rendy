@@ -6,25 +6,25 @@ use {
             InitialState, Level, OneShot, PendingOnceState, PrimaryLevel, QueueId, RecordingState,
             Submission, Supports,
         },
+        core::Device,
         resource::{Handle, Image},
         upload::ImageState,
-        util::Device,
     },
-    gfx_hal::Device as _,
+    rendy_core::hal::device::{Device as _, OutOfMemory},
     smallvec::SmallVec,
     std::{collections::VecDeque, iter::once, ops::DerefMut, ops::Range},
 };
 
 /// Manages blitting images across families and queues.
 #[derive(Debug)]
-pub struct Blitter<B: gfx_hal::Backend> {
+pub struct Blitter<B: rendy_core::hal::Backend> {
     family_ops: Vec<Option<parking_lot::Mutex<FamilyGraphicsOps<B>>>>,
 }
 
 fn subresource_to_range(
-    sub: &gfx_hal::image::SubresourceLayers,
-) -> gfx_hal::image::SubresourceRange {
-    gfx_hal::image::SubresourceRange {
+    sub: &rendy_core::hal::image::SubresourceLayers,
+) -> rendy_core::hal::image::SubresourceRange {
+    rendy_core::hal::image::SubresourceRange {
         aspects: sub.aspects,
         levels: sub.level..sub.level + 1,
         layers: sub.layers.clone(),
@@ -48,7 +48,7 @@ impl BlitRegion {
     /// `last` state must be valid for corresponding image layer at the time of command execution (after memory transfers).
     /// `last` and `next` should contain at least `image.levels()` elements.
     /// `image.levels()` must be greater than 1
-    pub fn mip_blits_for_image<B: gfx_hal::Backend>(
+    pub fn mip_blits_for_image<B: rendy_core::hal::Backend>(
         image: &Handle<Image<B>>,
         last: impl IntoIterator<Item = ImageState>,
         next: impl IntoIterator<Item = ImageState>,
@@ -57,10 +57,10 @@ impl BlitRegion {
 
         let aspects = image.format().surface_desc().aspects;
 
-        let transfer = gfx_hal::pso::PipelineStage::TRANSFER;
-        let src_optimal = gfx_hal::image::Layout::TransferSrcOptimal;
-        let read = gfx_hal::image::Access::TRANSFER_READ;
-        let write = gfx_hal::image::Access::TRANSFER_WRITE;
+        let transfer = rendy_core::hal::pso::PipelineStage::TRANSFER;
+        let src_optimal = rendy_core::hal::image::Layout::TransferSrcOptimal;
+        let read = rendy_core::hal::image::Access::TRANSFER_READ;
+        let write = rendy_core::hal::image::Access::TRANSFER_WRITE;
 
         let mut last_iter = last.into_iter();
         let mut next_iter = next.into_iter();
@@ -84,12 +84,12 @@ impl BlitRegion {
 
             blits.push(BlitRegion {
                 src: BlitImageState {
-                    subresource: gfx_hal::image::SubresourceLayers {
+                    subresource: rendy_core::hal::image::SubresourceLayers {
                         aspects,
                         level: level - 1,
                         layers: 0..image.layers(),
                     },
-                    bounds: gfx_hal::image::Offset::ZERO
+                    bounds: rendy_core::hal::image::Offset::ZERO
                         .into_bounds(&image.kind().level_extent(level - 1)),
                     last_stage: if begin { src_last.stage } else { transfer },
                     last_access: if begin { src_last.access } else { write },
@@ -99,16 +99,16 @@ impl BlitRegion {
                     next_layout: src_next.layout,
                 },
                 dst: BlitImageState {
-                    subresource: gfx_hal::image::SubresourceLayers {
+                    subresource: rendy_core::hal::image::SubresourceLayers {
                         aspects,
                         level,
                         layers: 0..image.layers(),
                     },
-                    bounds: gfx_hal::image::Offset::ZERO
+                    bounds: rendy_core::hal::image::Offset::ZERO
                         .into_bounds(&image.kind().level_extent(level)),
                     last_stage: dst_last.stage,
-                    last_access: gfx_hal::image::Access::empty(),
-                    last_layout: gfx_hal::image::Layout::Undefined,
+                    last_access: rendy_core::hal::image::Access::empty(),
+                    last_layout: rendy_core::hal::image::Layout::Undefined,
                     next_stage: if end { dst_next.stage } else { transfer },
                     next_access: if end { dst_next.access } else { read },
                     next_layout: if end { dst_next.layout } else { src_optimal },
@@ -123,9 +123,9 @@ impl BlitRegion {
     }
 }
 
-impl From<BlitRegion> for gfx_hal::command::ImageBlit {
+impl From<BlitRegion> for rendy_core::hal::command::ImageBlit {
     fn from(blit: BlitRegion) -> Self {
-        gfx_hal::command::ImageBlit {
+        rendy_core::hal::command::ImageBlit {
             src_subresource: blit.src.subresource,
             src_bounds: blit.src.bounds,
             dst_subresource: blit.dst.subresource,
@@ -137,19 +137,27 @@ impl From<BlitRegion> for gfx_hal::command::ImageBlit {
 /// A region and image states for one image in a blit.
 #[derive(Debug, Clone)]
 pub struct BlitImageState {
-    subresource: gfx_hal::image::SubresourceLayers,
-    bounds: Range<gfx_hal::image::Offset>,
-    last_stage: gfx_hal::pso::PipelineStage,
-    last_access: gfx_hal::image::Access,
-    last_layout: gfx_hal::image::Layout,
-    next_stage: gfx_hal::pso::PipelineStage,
-    next_access: gfx_hal::image::Access,
-    next_layout: gfx_hal::image::Layout,
+    /// Subresource to use for blit
+    pub subresource: rendy_core::hal::image::SubresourceLayers,
+    /// Image offset range to use for blit
+    pub bounds: Range<rendy_core::hal::image::Offset>,
+    /// Last image stage before blit
+    pub last_stage: rendy_core::hal::pso::PipelineStage,
+    /// Last image access before blit
+    pub last_access: rendy_core::hal::image::Access,
+    /// Last image layout before blit
+    pub last_layout: rendy_core::hal::image::Layout,
+    /// Image stage after blit
+    pub next_stage: rendy_core::hal::pso::PipelineStage,
+    /// Image access after blit
+    pub next_access: rendy_core::hal::image::Access,
+    /// Image layout after blit
+    pub next_layout: rendy_core::hal::image::Layout,
 }
 
 impl<B> Blitter<B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     /// # Safety
     ///
@@ -157,7 +165,7 @@ where
     pub(crate) unsafe fn new(
         device: &Device<B>,
         families: &Families<B>,
-    ) -> Result<Self, gfx_hal::device::OutOfMemory> {
+    ) -> Result<Self, OutOfMemory> {
         let mut family_ops = Vec::new();
         for family in families.as_slice() {
             while family_ops.len() <= family.id().index {
@@ -172,14 +180,14 @@ where
                 next: Vec::new(),
                 pending: VecDeque::new(),
                 read_barriers: Barriers::new(
-                    gfx_hal::pso::PipelineStage::TRANSFER,
-                    gfx_hal::buffer::Access::TRANSFER_READ,
-                    gfx_hal::image::Access::TRANSFER_READ,
+                    rendy_core::hal::pso::PipelineStage::TRANSFER,
+                    rendy_core::hal::buffer::Access::TRANSFER_READ,
+                    rendy_core::hal::image::Access::TRANSFER_READ,
                 ),
                 write_barriers: Barriers::new(
-                    gfx_hal::pso::PipelineStage::TRANSFER,
-                    gfx_hal::buffer::Access::TRANSFER_WRITE,
-                    gfx_hal::image::Access::TRANSFER_WRITE,
+                    rendy_core::hal::pso::PipelineStage::TRANSFER,
+                    rendy_core::hal::buffer::Access::TRANSFER_WRITE,
+                    rendy_core::hal::image::Access::TRANSFER_WRITE,
                 ),
             }));
         }
@@ -199,10 +207,10 @@ where
         &self,
         device: &Device<B>,
         image: Handle<Image<B>>,
-        filter: gfx_hal::image::Filter,
+        filter: rendy_core::hal::image::Filter,
         last: impl IntoIterator<Item = ImageState>,
         next: impl IntoIterator<Item = ImageState>,
-    ) -> Result<(), failure::Error> {
+    ) -> Result<(), OutOfMemory> {
         let (queue, blits) = BlitRegion::mip_blits_for_image(&image, last, next);
         for blit in blits {
             log::trace!("Blit: {:#?}", blit);
@@ -226,9 +234,9 @@ where
         queue_id: QueueId,
         src_image: &Handle<Image<B>>,
         dst_image: &Handle<Image<B>>,
-        filter: gfx_hal::image::Filter,
+        filter: rendy_core::hal::image::Filter,
         regions: impl IntoIterator<Item = BlitRegion>,
-    ) -> Result<(), failure::Error> {
+    ) -> Result<(), OutOfMemory> {
         let mut family_ops = self.family_ops[queue_id.family.index]
             .as_ref()
             .unwrap()
@@ -241,7 +249,8 @@ where
         let next_ops = next[queue_id.index].as_mut().unwrap();
         let mut encoder = next_ops.command_buffer.encoder();
 
-        blit_image(&mut encoder, src_image, dst_image, filter, regions)
+        blit_image(&mut encoder, src_image, dst_image, filter, regions);
+        Ok(())
     }
 
     /// Cleanup pending updates.
@@ -296,24 +305,23 @@ pub unsafe fn blit_image<B, C, L>(
     encoder: &mut Encoder<'_, B, C, L>,
     src_image: &Handle<Image<B>>,
     dst_image: &Handle<Image<B>>,
-    filter: gfx_hal::image::Filter,
+    filter: rendy_core::hal::image::Filter,
     regions: impl IntoIterator<Item = BlitRegion>,
-) -> Result<(), failure::Error>
-where
-    B: gfx_hal::Backend,
+) where
+    B: rendy_core::hal::Backend,
     C: Supports<Graphics>,
     L: Level,
 {
     let mut read_barriers = Barriers::new(
-        gfx_hal::pso::PipelineStage::TRANSFER,
-        gfx_hal::buffer::Access::TRANSFER_READ,
-        gfx_hal::image::Access::TRANSFER_READ,
+        rendy_core::hal::pso::PipelineStage::TRANSFER,
+        rendy_core::hal::buffer::Access::TRANSFER_READ,
+        rendy_core::hal::image::Access::TRANSFER_READ,
     );
 
     let mut write_barriers = Barriers::new(
-        gfx_hal::pso::PipelineStage::TRANSFER,
-        gfx_hal::buffer::Access::TRANSFER_WRITE,
-        gfx_hal::image::Access::TRANSFER_WRITE,
+        rendy_core::hal::pso::PipelineStage::TRANSFER,
+        rendy_core::hal::buffer::Access::TRANSFER_WRITE,
+        rendy_core::hal::image::Access::TRANSFER_WRITE,
     );
 
     let regions = regions
@@ -325,7 +333,7 @@ where
                 reg.src.last_stage,
                 reg.src.last_access,
                 reg.src.last_layout,
-                gfx_hal::image::Layout::TransferSrcOptimal,
+                rendy_core::hal::image::Layout::TransferSrcOptimal,
                 reg.src.next_stage,
                 reg.src.next_access,
                 reg.src.next_layout,
@@ -337,7 +345,7 @@ where
                 reg.dst.last_stage,
                 reg.dst.last_access,
                 reg.dst.last_layout,
-                gfx_hal::image::Layout::TransferDstOptimal,
+                rendy_core::hal::image::Layout::TransferDstOptimal,
                 reg.dst.next_stage,
                 reg.dst.next_access,
                 reg.dst.next_layout,
@@ -355,20 +363,19 @@ where
 
     encoder.blit_image(
         src_image.raw(),
-        gfx_hal::image::Layout::TransferSrcOptimal,
+        rendy_core::hal::image::Layout::TransferSrcOptimal,
         dst_image.raw(),
-        gfx_hal::image::Layout::TransferDstOptimal,
+        rendy_core::hal::image::Layout::TransferDstOptimal,
         filter,
         regions,
     );
 
     read_barriers.encode_after(encoder);
     write_barriers.encode_after(encoder);
-    Ok(())
 }
 
 #[derive(Debug)]
-pub(crate) struct FamilyGraphicsOps<B: gfx_hal::Backend> {
+pub(crate) struct FamilyGraphicsOps<B: rendy_core::hal::Backend> {
     pool: CommandPool<B, Graphics, IndividualReset>,
     initial: Vec<GraphicsOps<B, InitialState>>,
     next: Vec<Option<GraphicsOps<B, RecordingState<OneShot>>>>,
@@ -378,14 +385,14 @@ pub(crate) struct FamilyGraphicsOps<B: gfx_hal::Backend> {
 }
 
 #[derive(Debug)]
-struct GraphicsOps<B: gfx_hal::Backend, S> {
+struct GraphicsOps<B: rendy_core::hal::Backend, S> {
     command_buffer: CommandBuffer<B, Graphics, S, PrimaryLevel, IndividualReset>,
     fence: B::Fence,
 }
 
 impl<B> FamilyGraphicsOps<B>
 where
-    B: gfx_hal::Backend,
+    B: rendy_core::hal::Backend,
 {
     unsafe fn flush(&mut self, family: &mut Family<B>) {
         for (queue, next) in self
@@ -413,7 +420,7 @@ where
         &mut self,
         device: &Device<B>,
         queue: usize,
-    ) -> Result<&mut GraphicsOps<B, RecordingState<OneShot>>, failure::Error> {
+    ) -> Result<&mut GraphicsOps<B, RecordingState<OneShot>>, OutOfMemory> {
         while self.next.len() <= queue {
             self.next.push(None);
         }
@@ -423,7 +430,7 @@ where
         match &mut self.next[queue] {
             Some(next) => Ok(next),
             slot @ None => {
-                let initial: Result<_, failure::Error> = self.initial.pop().map_or_else(
+                let initial: Result<_, OutOfMemory> = self.initial.pop().map_or_else(
                     || {
                         Ok(GraphicsOps {
                             command_buffer: pool.allocate_buffers(1).remove(0),
@@ -457,7 +464,7 @@ where
                     self.pending.push_front(pending);
                     return;
                 }
-                Err(gfx_hal::device::DeviceLost) => {
+                Err(rendy_core::hal::device::DeviceLost) => {
                     panic!("Device lost error is not handled yet");
                 }
                 Ok(true) => {

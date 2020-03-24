@@ -3,7 +3,7 @@
 use {
     super::Sampler,
     crate::escape::Handle,
-    gfx_hal::{image::SamplerInfo, Backend},
+    rendy_core::hal::{image::SamplerDesc, Backend},
     std::{
         collections::hash_map::{Entry, HashMap},
         ops::{Deref, DerefMut},
@@ -11,10 +11,20 @@ use {
 };
 
 /// Sampler cache holds handlers to created samplers.
-#[derive(Debug, derivative::Derivative)]
-#[derivative(Default(bound = ""))]
+#[derive(Debug)]
 pub struct SamplerCache<B: Backend> {
-    samplers: HashMap<SamplerInfo, Handle<Sampler<B>>>,
+    samplers: HashMap<SamplerDesc, Handle<Sampler<B>>>,
+}
+
+impl<B> Default for SamplerCache<B>
+where
+    B: Backend,
+{
+    fn default() -> Self {
+        SamplerCache {
+            samplers: HashMap::default(),
+        }
+    }
 }
 
 impl<B> SamplerCache<B>
@@ -25,9 +35,9 @@ where
     /// Create new one using closure provided.
     pub fn get(
         &mut self,
-        info: SamplerInfo,
-        create: impl FnOnce() -> Result<Handle<Sampler<B>>, gfx_hal::device::AllocationError>,
-    ) -> Result<Handle<Sampler<B>>, gfx_hal::device::AllocationError> {
+        info: SamplerDesc,
+        create: impl FnOnce() -> Result<Handle<Sampler<B>>, rendy_core::hal::device::AllocationError>,
+    ) -> Result<Handle<Sampler<B>>, rendy_core::hal::device::AllocationError> {
         Ok(match self.samplers.entry(info) {
             Entry::Occupied(occupied) => occupied.get().clone(),
             Entry::Vacant(vacant) => {
@@ -43,9 +53,9 @@ where
     pub fn get_with_upgradable_lock<R, W, U>(
         read: R,
         upgrade: U,
-        info: SamplerInfo,
-        create: impl FnOnce() -> Result<Handle<Sampler<B>>, gfx_hal::device::AllocationError>,
-    ) -> Result<Handle<Sampler<B>>, gfx_hal::device::AllocationError>
+        info: SamplerDesc,
+        create: impl FnOnce() -> Result<Handle<Sampler<B>>, rendy_core::hal::device::AllocationError>,
+    ) -> Result<Handle<Sampler<B>>, rendy_core::hal::device::AllocationError>
     where
         R: Deref<Target = Self>,
         W: DerefMut<Target = Self>,

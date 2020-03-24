@@ -4,11 +4,6 @@
 //! Nothing fancy. Just prove that `rendy` works.
 //!
 
-#![cfg_attr(
-    not(any(feature = "dx12", feature = "metal", feature = "vulkan")),
-    allow(unused)
-)]
-
 use rendy::{
     command::{Families, QueueId, RenderPassEncoder},
     factory::{Config, Factory},
@@ -16,11 +11,16 @@ use rendy::{
         present::PresentNode, render::*, Graph, GraphBuilder, GraphContext, NodeBuffer, NodeImage,
     },
     hal,
+    init::winit::{
+        event::{Event, WindowEvent},
+        event_loop::{ControlFlow, EventLoop},
+        window::WindowBuilder,
+    },
+    init::AnyWindowedRendy,
     memory::Dynamic,
     mesh::PosColor,
     resource::{Buffer, BufferInfo, DescriptorSetLayout, Escape, Handle},
     shader::{ShaderKind, SourceLanguage, SourceShaderInfo, SpirvShader},
-    wsi::winit::{EventsLoop, WindowBuilder},
 };
 
 #[cfg(feature = "spirv-reflection")]
@@ -28,15 +28,6 @@ use rendy::shader::SpirvReflection;
 
 #[cfg(not(feature = "spirv-reflection"))]
 use rendy::mesh::AsVertex;
-
-#[cfg(feature = "dx12")]
-type Backend = rendy::dx12::Backend;
-
-#[cfg(feature = "metal")]
-type Backend = rendy::metal::Backend;
-
-#[cfg(feature = "vulkan")]
-type Backend = rendy::vulkan::Backend;
 
 lazy_static::lazy_static! {
     static ref VERTEX: SpirvShader = SourceShaderInfo::new(
@@ -138,7 +129,7 @@ where
         buffers: Vec<NodeBuffer>,
         images: Vec<NodeImage>,
         set_layouts: &[Handle<DescriptorSetLayout<B>>],
-    ) -> Result<TriangleRenderPipeline<B>, failure::Error> {
+    ) -> Result<TriangleRenderPipeline<B>, rendy_core::hal::pso::CreationError> {
         assert!(buffers.is_empty());
         assert!(images.is_empty());
         assert!(set_layouts.is_empty());
@@ -217,101 +208,109 @@ where
         _aux: &T,
     ) {
         let vbuf = self.vertex.as_ref().unwrap();
-        encoder.bind_vertex_buffers(0, Some((vbuf.raw(), 0)));
-        encoder.draw(0..3, 0..1);
+        unsafe {
+            encoder.bind_vertex_buffers(0, Some((vbuf.raw(), 0)));
+            encoder.draw(0..3, 0..1);
+        }
     }
 
     fn dispose(self, _factory: &mut Factory<B>, _aux: &T) {}
 }
 
-#[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
-fn run(
-    event_loop: &mut EventsLoop,
-    factory: &mut Factory<Backend>,
-    families: &mut Families<Backend>,
-    mut graph: Graph<Backend, ()>,
-) -> Result<(), failure::Error> {
+fn run<B: hal::Backend>(
+    event_loop: EventLoop<()>,
+    mut factory: Factory<B>,
+    mut families: Families<B>,
+    graph: Graph<B, ()>,
+) {
     let started = std::time::Instant::now();
 
-    let mut frames = 0u64..;
+    let mut frame = 0u64;
     let mut elapsed = started.elapsed();
+    let mut graph = Some(graph);
 
-    for _ in &mut frames {
-        factory.maintain(families);
-        event_loop.poll_events(|_| ());
-        graph.run(factory, families, &mut ());
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Poll;
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
+                _ => {}
+            },
+            Event::EventsCleared => {
+                factory.maintain(&mut families);
+                if let Some(ref mut graph) = graph {
+                    graph.run(&mut factory, &mut families, &());
+                    frame += 1;
+                }
 
-        elapsed = started.elapsed();
-        if elapsed >= std::time::Duration::new(5, 0) {
-            break;
+                elapsed = started.elapsed();
+                if elapsed >= std::time::Duration::new(5, 0) {
+                    *control_flow = ControlFlow::Exit
+                }
+            }
+            _ => {}
         }
-    }
 
-    let elapsed_ns = elapsed.as_secs() * 1_000_000_000 + elapsed.subsec_nanos() as u64;
+        if *control_flow == ControlFlow::Exit && graph.is_some() {
+            let elapsed_ns = elapsed.as_secs() * 1_000_000_000 + elapsed.subsec_nanos() as u64;
 
-    log::info!(
-        "Elapsed: {:?}. Frames: {}. FPS: {}",
-        elapsed,
-        frames.start,
-        frames.start * 1_000_000_000 / elapsed_ns
-    );
+            log::info!(
+                "Elapsed: {:?}. Frames: {}. FPS: {}",
+                elapsed,
+                frame,
+                frame * 1_000_000_000 / elapsed_ns
+            );
 
-    graph.dispose(factory, &mut ());
-    Ok(())
+            graph.take().unwrap().dispose(&mut factory, &());
+        }
+    });
 }
 
-#[cfg(any(feature = "dx12", feature = "metal", feature = "vulkan"))]
 fn main() {
     env_logger::Builder::from_default_env()
-        .filter_module("triangle", log::LevelFilter::Trace)
+        .filter_module("source_shaders", log::LevelFilter::Trace)
         .init();
 
     let config: Config = Default::default();
 
-    let (mut factory, mut families): (Factory<Backend>, _) = rendy::factory::init(config).unwrap();
-
-    let mut event_loop = EventsLoop::new();
-
+    let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("Rendy example")
-        .build(&event_loop)
-        .unwrap();
+        .with_inner_size((960, 640).into());
 
-    event_loop.poll_events(|_| ());
+    let rendy = AnyWindowedRendy::init_auto(&config, window, &event_loop).unwrap();
+    rendy::with_any_windowed_rendy!((rendy)
+        (mut factory, mut families, surface, window) => {
 
-    let surface = factory.create_surface(&window);
+            let mut graph_builder = GraphBuilder::<_, ()>::new();
 
-    let mut graph_builder = GraphBuilder::<Backend, ()>::new();
+            let size = window.inner_size().to_physical(window.hidpi_factor());
 
-    let size = window
-        .get_inner_size()
-        .unwrap()
-        .to_physical(window.get_hidpi_factor());
+            let color = graph_builder.create_image(
+                hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1),
+                1,
+                factory.get_surface_format(&surface),
+                Some(hal::command::ClearValue {
+                    color: hal::command::ClearColor {
+                        float32: [1.0, 1.0, 1.0, 1.0],
+                    },
+                }),
+            );
 
-    let color = graph_builder.create_image(
-        hal::image::Kind::D2(size.width as u32, size.height as u32, 1, 1),
-        1,
-        factory.get_surface_format(&surface),
-        Some(hal::command::ClearValue::Color([1.0, 1.0, 1.0, 1.0].into())),
+            let pass = graph_builder.add_node(
+                TriangleRenderPipeline::builder()
+                    .into_subpass()
+                    .with_color(color)
+                    .into_pass(),
+            );
+
+            graph_builder.add_node(PresentNode::builder(&factory, surface, color).with_dependency(pass));
+
+            let graph = graph_builder
+                .build(&mut factory, &mut families, &mut ())
+                .unwrap();
+
+            run(event_loop, factory, families, graph);
+        }
     );
-
-    let pass = graph_builder.add_node(
-        TriangleRenderPipeline::builder()
-            .into_subpass()
-            .with_color(color)
-            .into_pass(),
-    );
-
-    graph_builder.add_node(PresentNode::builder(&factory, surface, color).with_dependency(pass));
-
-    let graph = graph_builder
-        .build(&mut factory, &mut families, &mut ())
-        .unwrap();
-
-    run(&mut event_loop, &mut factory, &mut families, graph).unwrap();
-}
-
-#[cfg(not(any(feature = "dx12", feature = "metal", feature = "vulkan")))]
-fn main() {
-    panic!("Specify feature: { dx12, metal, vulkan }");
 }

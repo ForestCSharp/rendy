@@ -1,6 +1,7 @@
 //! This module provide functions for find all required synchronizations (barriers and semaphores).
 //!
 
+use std::collections::HashMap;
 use std::ops::{Range, RangeFrom, RangeTo};
 
 use crate::{
@@ -49,13 +50,13 @@ impl<S> Signal<S> {
 /// Semaphore wait info.
 /// There must be paired signal.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Wait<S>(S, gfx_hal::pso::PipelineStage);
+pub struct Wait<S>(S, rendy_core::hal::pso::PipelineStage);
 
 impl<S> Wait<S> {
     /// Create waiting for specified point.
     /// At this point `Signal` must be created as well.
     /// `id` and `point` combination must be unique.
-    fn new(semaphore: S, stages: gfx_hal::pso::PipelineStage) -> Self {
+    fn new(semaphore: S, stages: rendy_core::hal::pso::PipelineStage) -> Self {
         Wait(semaphore, stages)
     }
 
@@ -65,7 +66,7 @@ impl<S> Wait<S> {
     }
 
     /// Stage at which to wait.
-    pub fn stage(&self) -> gfx_hal::pso::PipelineStage {
+    pub fn stage(&self) -> rendy_core::hal::pso::PipelineStage {
         self.1
     }
 }
@@ -74,10 +75,10 @@ impl<S> Wait<S> {
 #[derive(Clone, Debug)]
 pub struct Barrier<R: Resource> {
     /// `Some` queue for ownership transfer. Or `None`
-    pub families: Option<Range<gfx_hal::queue::QueueFamilyId>>,
+    pub families: Option<Range<rendy_core::hal::queue::QueueFamilyId>>,
 
     /// State transition.
-    pub states: Range<(R::Access, R::Layout, gfx_hal::pso::PipelineStage)>,
+    pub states: Range<(R::Access, R::Layout, rendy_core::hal::pso::PipelineStage)>,
 }
 
 impl<R> Barrier<R>
@@ -96,7 +97,7 @@ where
     }
 
     fn transfer(
-        families: Range<gfx_hal::queue::QueueFamilyId>,
+        families: Range<rendy_core::hal::queue::QueueFamilyId>,
         states: Range<(R::Access, R::Layout)>,
     ) -> Self {
         Barrier {
@@ -104,18 +105,18 @@ where
             states: (
                 states.start.0,
                 states.start.1,
-                gfx_hal::pso::PipelineStage::TOP_OF_PIPE,
+                rendy_core::hal::pso::PipelineStage::TOP_OF_PIPE,
             )
                 ..(
                     states.end.0,
                     states.end.1,
-                    gfx_hal::pso::PipelineStage::BOTTOM_OF_PIPE,
+                    rendy_core::hal::pso::PipelineStage::BOTTOM_OF_PIPE,
                 ),
         }
     }
 
     fn acquire(
-        families: Range<gfx_hal::queue::QueueFamilyId>,
+        families: Range<rendy_core::hal::queue::QueueFamilyId>,
         left: RangeFrom<R::Layout>,
         right: RangeTo<(R::Access, R::Layout)>,
     ) -> Self {
@@ -126,7 +127,7 @@ where
     }
 
     fn release(
-        families: Range<gfx_hal::queue::QueueFamilyId>,
+        families: Range<rendy_core::hal::queue::QueueFamilyId>,
         left: RangeFrom<(R::Access, R::Layout)>,
         right: RangeTo<R::Layout>,
     ) -> Self {
@@ -138,7 +139,7 @@ where
 }
 
 /// Map of barriers by resource id.
-pub type Barriers<R> = fnv::FnvHashMap<Id, Barrier<R>>;
+pub type Barriers<R> = HashMap<Id, Barrier<R>>;
 
 /// Map of barriers by buffer id.
 pub type BufferBarriers = Barriers<Buffer>;
@@ -159,8 +160,8 @@ pub struct Guard {
 impl Guard {
     fn new() -> Self {
         Guard {
-            buffers: fnv::FnvHashMap::default(),
-            images: fnv::FnvHashMap::default(),
+            buffers: HashMap::default(),
+            images: HashMap::default(),
         }
     }
 
@@ -249,7 +250,7 @@ impl<S, W> SyncData<S, W> {
     }
 }
 
-struct SyncTemp(fnv::FnvHashMap<SubmissionId, SyncData<Semaphore, Semaphore>>);
+struct SyncTemp(HashMap<SubmissionId, SyncData<Semaphore, Semaphore>>);
 impl SyncTemp {
     fn get_sync(&mut self, sid: SubmissionId) -> &mut SyncData<Semaphore, Semaphore> {
         self.0.entry(sid).or_insert_with(|| SyncData::new())
@@ -265,7 +266,7 @@ where
     let ref buffers = chains.buffers;
     let ref images = chains.images;
 
-    let mut sync = SyncTemp(fnv::FnvHashMap::default());
+    let mut sync = SyncTemp(HashMap::default());
     for (&id, chain) in buffers {
         sync_chain(id, chain, schedule, &mut sync);
     }
@@ -277,8 +278,8 @@ where
     }
 
     let mut result = Schedule::new();
-    let mut signals: fnv::FnvHashMap<Semaphore, Option<S>> = fnv::FnvHashMap::default();
-    let mut waits: fnv::FnvHashMap<Semaphore, Option<W>> = fnv::FnvHashMap::default();
+    let mut signals: HashMap<Semaphore, Option<S>> = HashMap::default();
+    let mut waits: HashMap<Semaphore, Option<W>> = HashMap::default();
 
     for queue in schedule.iter().flat_map(|family| family.iter()) {
         let mut new_queue = Queue::new(queue.id());
@@ -459,7 +460,7 @@ where
 
 fn optimize_submission(
     sid: SubmissionId,
-    found: &mut fnv::FnvHashMap<QueueId, usize>,
+    found: &mut HashMap<QueueId, usize>,
     sync: &mut SyncTemp,
 ) {
     let mut to_remove = Vec::new();
@@ -498,7 +499,7 @@ fn optimize_submission(
 
 fn optimize<S>(schedule: &Schedule<S>, sync: &mut SyncTemp) {
     for queue in schedule.iter().flat_map(|family| family.iter()) {
-        let mut found = fnv::FnvHashMap::default();
+        let mut found = HashMap::default();
         for submission in queue.iter() {
             optimize_submission(submission.id(), &mut found, sync);
         }

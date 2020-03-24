@@ -208,15 +208,6 @@ impl_pixel_repr! {
 }
 
 /// One pixel
-/// By default deriving X adds T: X bound for all type parameters for the type.
-/// We use `derivative` here to override that.
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = ""),
-    Copy(bound = ""),
-    Debug(bound = ""),
-    Default(bound = "")
-)]
 #[repr(transparent)]
 pub struct Pixel<C, S, T>
 where
@@ -224,6 +215,39 @@ where
 {
     /// Pixel representation.
     pub repr: <C as PixelRepr<S, T>>::Repr,
+}
+
+impl<C, S, T> Copy for Pixel<C, S, T> where C: PixelRepr<S, T> {}
+
+impl<C, S, T> Clone for Pixel<C, S, T>
+where
+    C: PixelRepr<S, T>,
+{
+    fn clone(&self) -> Self {
+        Pixel {
+            repr: self.repr.clone(),
+        }
+    }
+}
+
+impl<C, S, T> std::fmt::Debug for Pixel<C, S, T>
+where
+    C: PixelRepr<S, T>,
+{
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("Pixel").field("repr", &self.repr).finish()
+    }
+}
+
+impl<C, S, T> Default for Pixel<C, S, T>
+where
+    C: PixelRepr<S, T>,
+{
+    fn default() -> Self {
+        Pixel {
+            repr: C::Repr::default(),
+        }
+    }
 }
 
 /// AsPixel trait for extracting the underlying data representation information from a Rust data type
@@ -239,7 +263,7 @@ pub trait AsPixel: Copy + std::fmt::Debug + Default + Send + Sync + 'static {
     const SIZE: u32;
 
     /// Pixel format.
-    const FORMAT: gfx_hal::format::Format;
+    const FORMAT: rendy_core::hal::format::Format;
 }
 
 macro_rules! impl_pixel {
@@ -251,7 +275,7 @@ macro_rules! impl_pixel {
             impl AsPixel for $alias {
                 const NAME: &'static str = stringify!($alias);
                 const SIZE: u32 = num_channels!($channels) * <$size as ChannelSize>::SIZE;
-                const FORMAT: gfx_hal::format::Format = gfx_hal::format::Format::$alias;
+                const FORMAT: rendy_core::hal::format::Format = rendy_core::hal::format::Format::$alias;
             }
         )*
     };

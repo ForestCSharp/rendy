@@ -7,10 +7,10 @@ use {
     crate::{
         buffer::Reset,
         capability::{Capability, QueueType, Supports},
+        core::{device_owned, Device, DeviceId},
         pool::CommandPool,
-        util::{device_owned, Device, DeviceId},
     },
-    gfx_hal::Backend,
+    rendy_core::hal::Backend,
 };
 
 pub use self::{queue::*, submission::*};
@@ -25,9 +25,9 @@ pub struct FamilyId {
     pub device: DeviceId,
 }
 
-impl From<FamilyId> for gfx_hal::queue::QueueFamilyId {
+impl From<FamilyId> for rendy_core::hal::queue::QueueFamilyId {
     fn from(id: FamilyId) -> Self {
-        gfx_hal::queue::QueueFamilyId(id.index)
+        rendy_core::hal::queue::QueueFamilyId(id.index)
     }
 }
 
@@ -44,12 +44,11 @@ pub struct QueueId {
 /// Family of the command queues.
 /// Queues from one family can share resources and execute command buffers associated with the family.
 /// All queues of the family have same capabilities.
-#[derive(derivative::Derivative)]
-#[derivative(Debug)]
+#[derive(Debug)]
 pub struct Family<B: Backend, C = QueueType> {
     id: FamilyId,
     queues: Vec<Queue<B>>,
-    // min_image_transfer_granularity: gfx_hal::image::Extent,
+    // min_image_transfer_granularity: rendy_core::hal::image::Extent,
     capability: C,
 }
 
@@ -68,19 +67,19 @@ where
     /// `family` must be one of the family indices used during `device` creation.
     /// `properties` must be the properties retuned for queue family from physical device.
     pub unsafe fn from_device(
-        queues: &mut gfx_hal::queue::Queues<B>,
+        queue_groups: &mut Vec<rendy_core::hal::queue::QueueGroup<B>>,
         id: FamilyId,
         count: usize,
-        family: &impl gfx_hal::queue::QueueFamily,
+        family: &impl rendy_core::hal::queue::QueueFamily,
     ) -> Self {
         Family {
             id,
             queues: {
-                let queues = queues
-                    .take_raw(gfx_hal::queue::QueueFamilyId(id.index))
-                    .expect("");
-                assert_eq!(queues.len(), count);
-                queues
+                let pos = queue_groups.iter().position(|qg| qg.family.0 == id.index);
+                let group = queue_groups.swap_remove(pos.unwrap());
+                assert_eq!(group.queues.len(), count);
+                group
+                    .queues
                     .into_iter()
                     .enumerate()
                     .map(|(index, queue)| Queue::new(queue, QueueId { family: id, index }))
@@ -126,7 +125,7 @@ where
     pub fn create_pool<R>(
         &self,
         device: &Device<B>,
-    ) -> Result<CommandPool<B, C, R>, gfx_hal::device::OutOfMemory>
+    ) -> Result<CommandPool<B, C, R>, rendy_core::hal::device::OutOfMemory>
     where
         R: Reset,
         C: Capability,
@@ -223,6 +222,19 @@ where
     pub fn indices(&self) -> &[usize] {
         &self.families_indices
     }
+
+    /// Find family id matching predicate
+    pub fn find<F>(&self, predicate: F) -> Option<FamilyId>
+    where
+        F: FnMut(&&Family<B>) -> bool,
+    {
+        self.families.iter().find(predicate).map(Family::id)
+    }
+
+    /// Get first matching family id with specified capability
+    pub fn with_capability<C: Capability>(&self) -> Option<FamilyId> {
+        self.find(|family| Supports::<C>::supports(&family.capability()).is_some())
+    }
 }
 
 /// Query queue families from device.
@@ -235,16 +247,16 @@ where
 /// `properties` must contain properties retuned for queue family from physical device for each family id yielded by `families`.
 pub unsafe fn families_from_device<B>(
     device: DeviceId,
-    queues: &mut gfx_hal::queue::Queues<B>,
+    queue_groups: &mut Vec<rendy_core::hal::queue::QueueGroup<B>>,
     families: impl IntoIterator<Item = (FamilyId, usize)>,
-    queue_types: &[impl gfx_hal::queue::QueueFamily],
+    queue_types: &[impl rendy_core::hal::queue::QueueFamily],
 ) -> Families<B>
 where
     B: Backend,
 {
     let families: Vec<_> = families
         .into_iter()
-        .map(|(id, count)| Family::from_device(queues, id, count, &queue_types[id.index]))
+        .map(|(id, count)| Family::from_device(queue_groups, id, count, &queue_types[id.index]))
         .collect();
 
     let mut families_indices = vec![!0; families.len()];
